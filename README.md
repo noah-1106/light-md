@@ -5,6 +5,15 @@
 </p>
 
 <p align="center">
+  <a href="../../releases"><img src="https://img.shields.io/github/v/release/noah-1106/light-md?style=flat-square&color=blue" alt="Release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/noah-1106/light-md?style=flat-square&color=green" alt="License"></a>
+  <a href="../../stargazers"><img src="https://img.shields.io/github/stars/noah-1106/light-md?style=flat-square&color=yellow" alt="Stars"></a>
+  <a href="../../actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflow/status/noah-1106/light-md/release.yml?style=flat-square&label=build" alt="Build"></a>
+  <img src="https://img.shields.io/badge/TypeScript-3178C6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript">
+  <img src="https://img.shields.io/badge/Rust-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust">
+</p>
+
+<p align="center">
   <b>极其轻量的 Markdown 编辑器</b><br>
   <sub>~5 MB 包体积 · 原生 macOS 集成 · 实时编辑预览 · 语义级滚动同步</sub>
 </p>
