@@ -30,28 +30,49 @@
 
 ### 文件管理
 - **自动保存** — 编辑后 1.5 秒自动保存，新文档自动以首行内容作为文件名保存到 `~/Documents/LightMD/`
-- **从 Finder 打开** — 注册为 macOS 默认 `.md` 打开器，双击 Markdown 文件即用 Light MD 打开
+- **双击打开文件** — 注册为系统默认 `.md` 打开器，双击 Markdown 文件即可打开
 - **拖拽打开** — 直接将 `.md` 文件拖入应用窗口即可打开
-- **打开默认文件夹** — 一键在 Finder 中定位到保存目录
+- **打开保存文件夹** — 一键在文件管理器中定位到保存目录
 
 ### 界面与交互
 - **深色 / 浅色主题** — 支持一键切换，跟随系统偏好
 - **可拖拽分栏** — 自由调整编辑器与预览区的宽度比例
-- **窗口关闭即驻留 Dock** — 点击关闭按钮不会退出应用，而是隐藏到后台，下次从 Dock 点击瞬间唤醒
+- **关闭驻留后台** — 点击关闭按钮不会退出应用，而是隐藏到后台，下次从任务栏/Dock 点击瞬间唤醒
 - **欢迎页** — 无文档时显示简洁的欢迎界面，快速新建或打开文件
 
 ## 安装
 
 ### 下载 Release（推荐）
 
-前往 [Releases](../../releases) 页面下载最新的 `Light MD_*.dmg`，双击安装后将应用拖入 **应用程序** 文件夹。
+前往 [Releases](../../releases) 页面下载对应平台的安装包：
 
-### 设置为默认 Markdown 打开器
+| 平台 | 文件 | 说明 |
+|------|------|------|
+| macOS (Apple Silicon) | `Light MD_*_aarch64.dmg` | M1/M2/M3 Mac |
+| macOS (Intel) | `Light MD_*_x86_64.dmg` | Intel Mac |
+| Windows | `Light MD_*_x64-setup.exe` / `.msi` | Windows 10+ |
+| Linux | `Light MD_*_amd64.deb` / `.AppImage` | Ubuntu/Debian 等 |
+
+> ⚠️ **注意**：当前 Release 为**未签名版本**。macOS 用户首次打开需在右键菜单选择"打开"；Windows 用户如遇 Defender 拦截，请点击"更多信息" → "仍要运行"。
+
+### macOS 设置为默认 Markdown 打开器
 
 1. 在 Finder 中右键任意 `.md` 文件
 2. 选择 **显示简介**
 3. 在 **打开方式** 中选择 **Light MD**
 4. 点击 **全部更改**
+
+### 通过 GitHub Actions 自行构建
+
+项目已配置 GitHub Actions，推送 `v*` 标签时自动为三个平台构建安装包：
+
+```bash
+# 给当前 commit 打 tag 并推送
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+推送后，前往 [Actions](../../actions) 页面查看构建进度，构建完成后在 [Releases](../../releases) 页面下载。Fork 本仓库后，同样可以通过给自己的 tag 推送触发构建。
 
 ## 从源码构建
 
@@ -77,7 +98,10 @@ npm run tauri dev
 npm run tauri build
 ```
 
-构建完成后，应用位于 `src-tauri/target/release/bundle/macos/Light MD.app`，DMG 安装包位于 `src-tauri/target/release/bundle/dmg/`。
+构建完成后，安装包位于各平台对应目录：
+- **macOS**: `src-tauri/target/release/bundle/macos/Light MD.app`
+- **Windows**: `src-tauri/target/release/bundle/msi/` 或 `bundle/nsis/`
+- **Linux**: `src-tauri/target/release/bundle/deb/` 或 `bundle/appimage/`
 
 ## 技术栈
 
@@ -88,7 +112,8 @@ npm run tauri build
 | 渲染引擎 | [marked](https://marked.js.org/) | Markdown → HTML，开启 GitHub 风格换行 |
 | 代码高亮 | [highlight.js](https://highlightjs.org/) | 预览区代码块语法高亮 |
 | 构建工具 | [Vite](https://vitejs.dev/) + TypeScript | 前端构建 |
-| 后端 | Rust | 文件 I/O、macOS 原生集成 |
+| 后端 | Rust | 文件 I/O、跨平台原生集成 |
+| CI/CD | GitHub Actions | 推送 Tag 自动构建 macOS / Windows / Linux 安装包 |
 
 ## 为什么做 Light MD
 
@@ -101,7 +126,7 @@ npm run tauri build
 | Typora | ~70 MB | 中等 | 一般 |
 | VS Code | ~350 MB | 较慢 | 无（通用编辑器） |
 | MarkText | ~180 MB | 中等 | 一般 |
-| **Light MD** | **~5 MB** | **快** | **深度 macOS 集成** |
+| **Light MD** | **~5 MB** | **快** | **原生系统集成** |
 
 Light MD 不追求 All-in-One，而是为"打开、编辑、保存 Markdown"这个核心场景提供极致流畅的体验。
 
@@ -112,7 +137,7 @@ light-md/
 ├── src/                    # 前端源码（Vanilla TS + CSS）
 │   ├── main.ts             # 编辑器、标签页、同步滚动、主题逻辑
 │   ├── styles.css          # 全部 UI 样式
-│   └── main.ts             # Vite 入口
+│   └── assets/             # 静态资源
 ├── src-tauri/              # Tauri / Rust 后端
 │   ├── src/lib.rs          # 文件 I/O、macOS 集成命令
 │   ├── icons/              # 应用图标（自动生成脚本）
