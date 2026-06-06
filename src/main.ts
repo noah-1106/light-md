@@ -6,9 +6,11 @@ import { basicSetup } from "codemirror";
 import { oneDark } from "@codemirror/theme-one-dark";
 import { marked } from "marked";
 import hljs from "highlight.js";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
+import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
+import { openUrl, openPath } from "@tauri-apps/plugin-opener";
 
 marked.use({ breaks: true });
 
@@ -34,6 +36,7 @@ const themeCompartment = new Compartment();
 let autoSaveTimer: ReturnType<typeof setTimeout> | null = null;
 let defaultFolder: string = "";
 let tabCounter = 0;
+const openedPaths = new Set<string>();
 
 // ─── DOM refs ───
 const editorPane = document.getElementById("editor-pane")!;
@@ -286,6 +289,8 @@ function createEditorState(content: string): EditorState {
 function initEditor() {
   if (editor) return;
   editor = new EditorView({ state: createEditorState(""), parent: editorPane });
+  initImageDrop();
+  initImagePaste();
 }
 
 // ─── Preview ───
@@ -303,7 +308,67 @@ const previewRender = debounce(async (content: string) => {
   previewContent.querySelectorAll("pre code").forEach((block) => {
     hljs.highlightElement(block as HTMLElement);
   });
+
+  fixImageSrcs();
+  attachLinkHandlers();
 }, 200);
+
+function resolveImagePath(src: string): string | null {
+  if (!src || /^https?:|^data:/i.test(src)) return src;
+  if (src.startsWith("/")) return src;
+  if (src.startsWith("~")) {
+    const home = defaultFolder.split("/Documents")[0];
+    return src.replace("~", home);
+  }
+  const tab = getActiveTab();
+  if (tab?.path) {
+    const base = tab.path.slice(0, tab.path.lastIndexOf("/") + 1);
+    return base + src;
+  }
+  return defaultFolder ? `${defaultFolder}/${src}` : src;
+}
+
+function fixImageSrcs() {
+  previewContent.querySelectorAll("img").forEach((img) => {
+    const src = img.getAttribute("src");
+    if (!src) return;
+    const abs = resolveImagePath(src);
+    if (abs && abs !== src && !/^https?:|^data:/i.test(abs)) {
+      img.src = convertFileSrc(abs);
+    }
+  });
+}
+
+function attachLinkHandlers() {
+  previewContent.querySelectorAll("a").forEach((a) => {
+    a.addEventListener("click", async (e) => {
+      e.preventDefault();
+      const href = a.getAttribute("href");
+      if (!href) return;
+
+      try {
+        if (/^(https?:|mailto:|tel:)/i.test(href)) {
+          await openUrl(href);
+        } else {
+          // Resolve relative path against document directory
+          let resolved = href;
+          if (!href.startsWith("/") && !href.startsWith("~")) {
+            const tab = getActiveTab();
+            if (tab?.path) {
+              const base = tab.path.slice(0, tab.path.lastIndexOf("/") + 1);
+              resolved = base + href;
+            } else {
+              resolved = defaultFolder ? `${defaultFolder}/${href}` : href;
+            }
+          }
+          await openPath(resolved);
+        }
+      } catch (err) {
+        console.error("open link failed:", err);
+      }
+    });
+  });
+}
 
 // ─── Tab Operations ───
 function newTab(content = "", path: string | null = null, fullName = "未命名.md") {
@@ -375,6 +440,12 @@ async function openFileDialog() {
 }
 
 async function loadFile(path: string) {
+  // 避免重复打开同一文件
+  const existing = tabs.find((t) => t.path === path);
+  if (existing) {
+    switchTab(existing.id);
+    return;
+  }
   try {
     const content = await invoke<string>("read_file", { path });
     const [name] = await invoke<[string, number]>("get_file_info", { path });
@@ -391,6 +462,153 @@ async function openDefaultFolder() {
   } catch (e) {
     console.error("open folder failed:", e);
   }
+}
+
+// ─── Image Insertion ───
+function isImageFile(name: string): boolean {
+  return /\.(png|jpg|jpeg|gif|svg|webp|bmp|ico|tiff?)$/i.test(name);
+}
+
+function generateImageFilename(ext: string): string {
+  const timestamp = Date.now();
+  const cleanExt = ext.replace(/[^a-zA-Z0-9]/g, "").toLowerCase() || "png";
+  return `image-${timestamp}.${cleanExt}`;
+}
+
+function getImageSaveDir(): string {
+  const tab = getActiveTab();
+  if (tab?.path) {
+    const lastSlash = tab.path.lastIndexOf("/");
+    const docDir = lastSlash >= 0 ? tab.path.slice(0, lastSlash) : defaultFolder;
+    const docName = stripExt(tab.fullName) || "未命名";
+    return `${docDir}/${docName}.images`;
+  }
+  return `${defaultFolder}/images`;
+}
+
+function getImagePathForMarkdown(savedPath: string): string {
+  const tab = getActiveTab();
+  if (tab?.path) {
+    const docDir = tab.path.slice(0, tab.path.lastIndexOf("/") + 1);
+    if (savedPath.startsWith(docDir)) {
+      return savedPath.slice(docDir.length);
+    }
+  }
+  if (defaultFolder && savedPath.startsWith(defaultFolder)) {
+    const rel = savedPath.slice(defaultFolder.length);
+    return rel.startsWith("/") ? `.${rel}` : `./${rel}`;
+  }
+  return savedPath;
+}
+
+async function saveImageToDisk(data: Uint8Array, filename: string): Promise<string | null> {
+  const dir = getImageSaveDir();
+  const path = `${dir}/${filename}`;
+  try {
+    await invoke("save_image", { path, data: Array.from(data) });
+    return path;
+  } catch (e) {
+    console.error("save image failed:", e);
+    return null;
+  }
+}
+
+function insertImageMarkdown(savedPath: string, alt: string = "image") {
+  const path = getImagePathForMarkdown(savedPath);
+  const markdown = `![${alt}](${path})`;
+  const pos = editor.state.selection.main.head;
+  editor.dispatch({
+    changes: { from: pos, insert: markdown },
+  });
+}
+
+function initImageDrop() {
+  const el = editor.dom;
+
+  el.addEventListener("dragover", (e) => {
+    const files = e.dataTransfer?.files;
+    if (!files || files.length === 0) return;
+    let hasImage = false;
+    for (let i = 0; i < files.length; i++) {
+      if (isImageFile(files[i].name)) {
+        hasImage = true;
+        break;
+      }
+    }
+    if (!hasImage) return;
+    e.preventDefault();
+  });
+
+  el.addEventListener("drop", async (e) => {
+    const files = e.dataTransfer?.files;
+    if (!files || files.length === 0) return;
+
+    let hasImage = false;
+    for (let i = 0; i < files.length; i++) {
+      if (isImageFile(files[i].name)) {
+        hasImage = true;
+        break;
+      }
+    }
+    if (!hasImage) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      if (!isImageFile(file.name)) continue;
+      try {
+        const buffer = await file.arrayBuffer();
+        const ext = file.name.slice(file.name.lastIndexOf(".") + 1) || "png";
+        const filename = generateImageFilename(ext);
+        const savedPath = await saveImageToDisk(new Uint8Array(buffer), filename);
+        if (savedPath) {
+          const alt = file.name.slice(0, file.name.lastIndexOf(".")) || "image";
+          insertImageMarkdown(savedPath, alt);
+        }
+      } catch (err) {
+        console.error("drop image failed:", err);
+      }
+    }
+  });
+}
+
+function initImagePaste() {
+  const el = editor.dom;
+  el.addEventListener("paste", async (e) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+
+    let hasImage = false;
+    for (const item of Array.from(items)) {
+      if (item.type.startsWith("image/")) {
+        hasImage = true;
+        break;
+      }
+    }
+    if (!hasImage) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+
+    for (const item of Array.from(items)) {
+      if (!item.type.startsWith("image/")) continue;
+      const blob = item.getAsFile();
+      if (!blob) continue;
+      try {
+        const buffer = await blob.arrayBuffer();
+        const ext = item.type.split("/")[1] || "png";
+        const filename = generateImageFilename(ext);
+        const savedPath = await saveImageToDisk(new Uint8Array(buffer), filename);
+        if (savedPath) {
+          insertImageMarkdown(savedPath);
+        }
+      } catch (err) {
+        console.error("paste image failed:", err);
+      }
+    }
+  });
 }
 
 // ─── Splitter ───
@@ -496,11 +714,40 @@ async function init() {
     defaultFolder = "";
   }
 
-  // Handle file open from Finder
+  // Handle file open from command line args (Rust backend)
   listen("open-file", (event) => {
     const path = event.payload as string;
-    if (path) loadFile(path);
+    if (path && !openedPaths.has(path)) {
+      openedPaths.add(path);
+      loadFile(path);
+    }
   });
+
+  // Handle deep-link file open (macOS Finder double-click / Windows)
+  async function handleDeepLinkUrls(urls: string[]) {
+    for (const url of urls) {
+      if (url.startsWith("file://")) {
+        const path = decodeURIComponent(url.slice(7));
+        if (path && !openedPaths.has(path)) {
+          openedPaths.add(path);
+          loadFile(path);
+        }
+      }
+    }
+  }
+
+  try {
+    // Register listener for when app is already running
+    await onOpenUrl((urls) => handleDeepLinkUrls(urls));
+
+    // Handle cold-start: URLs that arrived before listener was registered
+    const currentUrls = await getCurrent();
+    if (currentUrls) {
+      handleDeepLinkUrls(currentUrls);
+    }
+  } catch (e) {
+    console.error("deep link init failed:", e);
+  }
 
   // Buttons
   document.getElementById("btn-new")!.addEventListener("click", () => newTab());

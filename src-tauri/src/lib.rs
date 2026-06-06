@@ -63,6 +63,20 @@ fn open_folder(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn save_image(path: &str, data: Vec<u8>) -> Result<(), String> {
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(path, data).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn read_file_binary(path: &str) -> Result<String, String> {
+    let data = std::fs::read(path).map_err(|e| e.to_string())?;
+    Ok(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &data))
+}
+
 fn is_md_file(path: &std::path::Path) -> bool {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     matches!(ext.to_lowercase().as_str(), "md" | "markdown" | "mdown" | "mkd")
@@ -73,6 +87,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_deep_link::init())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             read_file,
@@ -82,7 +97,9 @@ pub fn run() {
             get_current_file,
             rename_file,
             get_default_folder,
-            open_folder
+            open_folder,
+            save_image,
+            read_file_binary
         ])
         .setup(|app| {
             let args: Vec<String> = std::env::args().collect();
