@@ -33,6 +33,7 @@ let currentTheme: "light" | "dark" = window.matchMedia("(prefers-color-scheme: d
   ? "dark"
   : "light";
 const themeCompartment = new Compartment();
+const fontSizeCompartment = new Compartment();
 let autoSaveTimer: ReturnType<typeof setTimeout> | null = null;
 let defaultFolder: string = "";
 let tabCounter = 0;
@@ -206,15 +207,22 @@ function escapeHtml(s: string): string {
   return div.innerHTML;
 }
 
+function getEditorFontSizeExtension() {
+  const size = 14.5 * zoomLevel;
+  return EditorView.theme({
+    ".cm-content": { fontSize: `${size}px` },
+    ".cm-gutters": { fontSize: `${size}px` },
+  });
+}
+
 function applyZoom() {
-  const editorSize = 14.5 * zoomLevel;
   const previewSize = 15.5 * zoomLevel;
-  document.documentElement.style.setProperty("--editor-font-size", `${editorSize}px`);
   document.documentElement.style.setProperty("--preview-font-size", `${previewSize}px`);
 
   if (editor) {
-    // Force CodeMirror to remeasure layout after font-size change
-    editor.dispatch({});
+    editor.dispatch({
+      effects: fontSizeCompartment.reconfigure(getEditorFontSizeExtension()),
+    });
   }
 }
 
@@ -323,6 +331,7 @@ function createEditorState(content: string): EditorState {
       markdown(),
       EditorView.lineWrapping,
       themeCompartment.of(isDark ? oneDark : []),
+      fontSizeCompartment.of(getEditorFontSizeExtension()),
       EditorView.updateListener.of((update: ViewUpdate) => {
         if (update.docChanged) {
           const tab = getActiveTab();
@@ -729,7 +738,8 @@ function initSyncScroll() {
 
       if (target) {
         const maxScroll = previewPane.scrollHeight - previewPane.clientHeight;
-        previewPane.scrollTop = Math.max(0, Math.min(target.offsetTop - 8, maxScroll));
+        const offsetTop = target.offsetTop - previewPane.offsetTop;
+        previewPane.scrollTop = Math.max(0, Math.min(offsetTop - 8, maxScroll));
       } else {
         // Fallback to proportional sync when no anchor is available
         const ratio =
