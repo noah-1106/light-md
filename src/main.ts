@@ -207,7 +207,15 @@ function escapeHtml(s: string): string {
 }
 
 function applyZoom() {
-  document.documentElement.style.zoom = String(zoomLevel);
+  const editorSize = 14.5 * zoomLevel;
+  const previewSize = 15.5 * zoomLevel;
+  document.documentElement.style.setProperty("--editor-font-size", `${editorSize}px`);
+  document.documentElement.style.setProperty("--preview-font-size", `${previewSize}px`);
+
+  if (editor) {
+    // Force CodeMirror to remeasure layout after font-size change
+    editor.dispatch({});
+  }
 }
 
 function zoomIn() {
