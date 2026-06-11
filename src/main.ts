@@ -37,6 +37,10 @@ let autoSaveTimer: ReturnType<typeof setTimeout> | null = null;
 let defaultFolder: string = "";
 let tabCounter = 0;
 const openedPaths = new Set<string>();
+let zoomLevel = 1.0;
+const MIN_ZOOM = 0.5;
+const MAX_ZOOM = 2.0;
+const ZOOM_STEP = 0.1;
 
 // ─── DOM refs ───
 const editorPane = document.getElementById("editor-pane")!;
@@ -202,11 +206,57 @@ function escapeHtml(s: string): string {
   return div.innerHTML;
 }
 
+function applyZoom() {
+  document.documentElement.style.zoom = String(zoomLevel);
+}
+
+function zoomIn() {
+  zoomLevel = Math.min(MAX_ZOOM, zoomLevel + ZOOM_STEP);
+  applyZoom();
+  localStorage.setItem("lightmd-zoom", String(zoomLevel));
+  const tab = getActiveTab();
+  if (tab) {
+    const pos = editor.state.selection.main.head;
+    const line = editor.state.doc.lineAt(pos);
+    updateStatus(line.number, pos - line.from + 1);
+  } else {
+    updateStatus(1, 1);
+  }
+}
+
+function zoomOut() {
+  zoomLevel = Math.max(MIN_ZOOM, zoomLevel - ZOOM_STEP);
+  applyZoom();
+  localStorage.setItem("lightmd-zoom", String(zoomLevel));
+  const tab = getActiveTab();
+  if (tab) {
+    const pos = editor.state.selection.main.head;
+    const line = editor.state.doc.lineAt(pos);
+    updateStatus(line.number, pos - line.from + 1);
+  } else {
+    updateStatus(1, 1);
+  }
+}
+
+function zoomReset() {
+  zoomLevel = 1.0;
+  applyZoom();
+  localStorage.setItem("lightmd-zoom", String(zoomLevel));
+  const tab = getActiveTab();
+  if (tab) {
+    const pos = editor.state.selection.main.head;
+    const line = editor.state.doc.lineAt(pos);
+    updateStatus(line.number, pos - line.from + 1);
+  } else {
+    updateStatus(1, 1);
+  }
+}
+
 function updateStatus(line: number, col: number) {
   const tab = getActiveTab();
   const chars = tab ? tab.content.length : 0;
   const words = tab ? tab.content.trim().split(/\s+/).filter(Boolean).length : 0;
-  statusInfoEl.textContent = `${chars} \u5b57 | ${words} \u8bcd | \u884c ${line}, \u5217 ${col}`;
+  statusInfoEl.textContent = `${Math.round(zoomLevel * 100)}% | ${chars} \u5b57 | ${words} \u8bcd | \u884c ${line}, \u5217 ${col}`;
   statusPathEl.textContent = tab?.path ?? "-";
 }
 
@@ -221,7 +271,7 @@ function showWelcome() {
   mainArea.style.display = "none";
   tabBar.style.display = "none";
   statusPathEl.textContent = "-";
-  statusInfoEl.textContent = "0 \u5b57 | \u884c 1, \u5217 1";
+  updateStatus(1, 1);
 }
 
 // ─── Auto Save ───
@@ -707,6 +757,16 @@ async function init() {
   if (saved === "light" || saved === "dark") currentTheme = saved;
   applyTheme();
 
+  // Restore zoom
+  const savedZoom = localStorage.getItem("lightmd-zoom");
+  if (savedZoom) {
+    const parsed = parseFloat(savedZoom);
+    if (!isNaN(parsed) && parsed >= MIN_ZOOM && parsed <= MAX_ZOOM) {
+      zoomLevel = parsed;
+      applyZoom();
+    }
+  }
+
   // Get default folder from backend
   try {
     defaultFolder = await invoke<string>("get_default_folder");
@@ -715,10 +775,11 @@ async function init() {
   }
 
   // Handle file open from command line args (Rust backend)
-  listen("open-file", (event) => {
+  listen("open-file", async (event) => {
     const path = event.payload as string;
     if (path && !openedPaths.has(path)) {
       openedPaths.add(path);
+      await invoke("show_and_focus_window");
       loadFile(path);
     }
   });
@@ -730,6 +791,7 @@ async function init() {
         const path = decodeURIComponent(url.slice(7));
         if (path && !openedPaths.has(path)) {
           openedPaths.add(path);
+          await invoke("show_and_focus_window");
           loadFile(path);
         }
       }
@@ -758,6 +820,22 @@ async function init() {
   // Welcome screen
   document.getElementById("welcome-new")!.addEventListener("click", () => newTab());
   document.getElementById("welcome-open")!.addEventListener("click", openFileDialog);
+
+  // Keyboard shortcuts
+  document.addEventListener("keydown", (e) => {
+    const isMod = e.metaKey || e.ctrlKey;
+    if (!isMod) return;
+    if (e.key === "=" || e.key === "+") {
+      e.preventDefault();
+      zoomIn();
+    } else if (e.key === "-") {
+      e.preventDefault();
+      zoomOut();
+    } else if (e.key === "0") {
+      e.preventDefault();
+      zoomReset();
+    }
+  });
 
   initSplitter();
   initSyncScroll();

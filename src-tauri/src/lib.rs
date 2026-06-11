@@ -1,5 +1,5 @@
 use std::sync::Mutex;
-use tauri::{DragDropEvent, Emitter, State};
+use tauri::{DragDropEvent, Emitter, Manager, State};
 
 #[derive(Default)]
 pub struct AppState {
@@ -77,6 +77,12 @@ fn read_file_binary(path: &str) -> Result<String, String> {
     Ok(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &data))
 }
 
+#[tauri::command]
+fn show_and_focus_window(window: tauri::Window) {
+    let _ = window.show();
+    let _ = window.set_focus();
+}
+
 fn is_md_file(path: &std::path::Path) -> bool {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     matches!(ext.to_lowercase().as_str(), "md" | "markdown" | "mdown" | "mkd")
@@ -99,7 +105,8 @@ pub fn run() {
             get_default_folder,
             open_folder,
             save_image,
-            read_file_binary
+            read_file_binary,
+            show_and_focus_window
         ])
         .setup(|app| {
             let args: Vec<String> = std::env::args().collect();
@@ -127,10 +134,31 @@ pub fn run() {
                             let _ = window.emit("open-file", path.to_string_lossy().to_string());
                         }
                     }
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+                tauri::WindowEvent::Focused(focused) => {
+                    if *focused {
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
                 }
                 _ => {}
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            match event {
+                tauri::RunEvent::Reopen { has_visible_windows, .. } => {
+                    if !has_visible_windows {
+                        if let Some(window) = app_handle.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                }
+                _ => {}
+            }
+        });
 }
