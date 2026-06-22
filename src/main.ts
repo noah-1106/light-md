@@ -37,7 +37,6 @@ const fontSizeCompartment = new Compartment();
 let autoSaveTimer: ReturnType<typeof setTimeout> | null = null;
 let defaultFolder: string = "";
 let tabCounter = 0;
-const openedPaths = new Set<string>();
 let zoomLevel = 1.0;
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 2.0;
@@ -795,8 +794,7 @@ async function init() {
   // Handle file open from command line args (Rust backend)
   listen("open-file", async (event) => {
     const path = event.payload as string;
-    if (path && !openedPaths.has(path)) {
-      openedPaths.add(path);
+    if (path) {
       await invoke("show_and_focus_window");
       loadFile(path);
     }
@@ -807,8 +805,7 @@ async function init() {
     for (const url of urls) {
       if (url.startsWith("file://")) {
         const path = decodeURIComponent(url.slice(7));
-        if (path && !openedPaths.has(path)) {
-          openedPaths.add(path);
+        if (path) {
           await invoke("show_and_focus_window");
           loadFile(path);
         }
