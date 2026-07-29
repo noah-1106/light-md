@@ -89,6 +89,11 @@ jobs:
           p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
           p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
 
+      - name: Allow codesign access to Developer ID keychain
+        run: |
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${{ secrets.APPLE_CERTIFICATE_PASSWORD }}" signing_temp.keychain
+          security unlock-keychain -p "${{ secrets.APPLE_CERTIFICATE_PASSWORD }}" signing_temp.keychain
+
       - name: Build Tauri (direct .dmg)
         uses: tauri-apps/tauri-action@v0
         env:
@@ -149,6 +154,13 @@ jobs:
           create-keychain: true
           p12-file-base64: ${{ secrets.APPLE_CERTIFICATE_MAS_INSTALLER }}
           p12-password: ${{ secrets.APPLE_CERTIFICATE_MAS_INSTALLER_PASSWORD }}
+
+      - name: Allow codesign access to MAS keychains
+        run: |
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${{ secrets.APPLE_CERTIFICATE_MAS_PASSWORD }}" signing_temp_app.keychain
+          security unlock-keychain -p "${{ secrets.APPLE_CERTIFICATE_MAS_PASSWORD }}" signing_temp_app.keychain
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${{ secrets.APPLE_CERTIFICATE_MAS_INSTALLER_PASSWORD }}" signing_temp_installer.keychain
+          security unlock-keychain -p "${{ secrets.APPLE_CERTIFICATE_MAS_INSTALLER_PASSWORD }}" signing_temp_installer.keychain
 
       - name: Build Tauri (MAS .app)
         uses: tauri-apps/tauri-action@v0
