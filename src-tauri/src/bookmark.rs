@@ -7,7 +7,9 @@ use core_foundation::data::CFData;
 #[cfg(target_os = "macos")]
 use core_foundation::url::CFURL;
 #[cfg(target_os = "macos")]
+#[cfg(target_os = "macos")]
 use core_foundation_sys::base::{kCFAllocatorDefault, Boolean};
+#[cfg(target_os = "macos")]
 use core_foundation_sys::error::CFErrorRef;
 #[cfg(target_os = "macos")]
 use core_foundation_sys::url::{

@@ -150,14 +150,23 @@ jobs:
           p12-file-base64: ${{ secrets.APPLE_CERTIFICATE_MAS_INSTALLER }}
           p12-password: ${{ secrets.APPLE_CERTIFICATE_MAS_INSTALLER_PASSWORD }}
 
-      - name: Build Tauri (MAS .pkg)
+      - name: Build Tauri (MAS .app)
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APPLE_SIGNING_IDENTITY: "3rd Party Mac Developer Application: Tan Zaichao (UWJL48X4C8)"
           APPLE_TEAM_ID: "UWJL48X4C8"
         with:
-          args: '--target universal-apple-darwin --bundles pkg'
+          args: '--target universal-apple-darwin --bundles app'
+
+      - name: Build MAS installer .pkg
+        env:
+          INSTALLER_IDENTITY: "3rd Party Mac Developer Installer: Tan Zaichao (UWJL48X4C8)"
+        run: |
+          APP_PATH="src-tauri/target/universal-apple-darwin/release/bundle/macos/Light MD.app"
+          PKG_PATH="src-tauri/target/universal-apple-darwin/release/bundle/macos/Light MD.pkg"
+          mkdir -p "src-tauri/target/universal-apple-darwin/release/bundle/macos"
+          productbuild --component "$APP_PATH" /Applications "$PKG_PATH" --sign "$INSTALLER_IDENTITY"
 
       - name: Write App Store Connect API key
         env:
