@@ -25,8 +25,7 @@
     "security": {
       "csp": null,
       "assetProtocol": {
-        "enable": true,
-        "scope": ["**"]
+        "enable": false
       }
     }
   },
@@ -40,8 +39,8 @@
       "icons/icon.ico"
     ],
     "macOS": {
-      "minimumSystemVersion": "10.13",
-      "entitlements": "Info.plist"
+      "minimumSystemVersion": "11.0",
+      "entitlements": "Entitlements.plist"
     }
   }
 }

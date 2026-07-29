@@ -6,7 +6,7 @@ import { basicSetup } from "codemirror";
 import { oneDark } from "@codemirror/theme-one-dark";
 import { marked } from "marked";
 import hljs from "highlight.js";
-import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
@@ -394,13 +394,17 @@ function resolveImagePath(src: string): string | null {
   return defaultFolder ? `${defaultFolder}/${src}` : src;
 }
 
+function getImageUrl(absPath: string): string {
+  return `lightmd://image/${encodeURIComponent(absPath)}`;
+}
+
 function fixImageSrcs() {
   previewContent.querySelectorAll("img").forEach((img) => {
     const src = img.getAttribute("src");
     if (!src) return;
     const abs = resolveImagePath(src);
     if (abs && abs !== src && !/^https?:|^data:/i.test(abs)) {
-      img.src = convertFileSrc(abs);
+      img.src = getImageUrl(abs);
     }
   });
 }
@@ -527,6 +531,45 @@ async function openDefaultFolder() {
     await invoke("open_folder", { path: defaultFolder });
   } catch (e) {
     console.error("open folder failed:", e);
+  }
+}
+
+async function initDefaultFolder() {
+  try {
+    defaultFolder = await invoke<string>("get_default_folder");
+  } catch (e) {
+    defaultFolder = "";
+  }
+
+  if (defaultFolder) return;
+
+  let chosen: string | null = null;
+  try {
+    const suggested = await invoke<string>("get_suggested_default_folder");
+    chosen = await open({
+      directory: true,
+      defaultPath: suggested,
+    });
+  } catch (e) {
+    console.error("folder picker failed:", e);
+  }
+
+  if (chosen) {
+    try {
+      await invoke("set_default_folder", { path: chosen });
+      defaultFolder = chosen;
+    } catch (e) {
+      console.error("set default folder failed:", e);
+    }
+  }
+
+  if (!defaultFolder) {
+    try {
+      defaultFolder = await invoke<string>("get_container_documents_folder");
+    } catch (e) {
+      console.error("container documents folder failed:", e);
+      defaultFolder = "";
+    }
   }
 }
 
@@ -785,11 +828,11 @@ async function init() {
   }
 
   // Get default folder from backend
-  try {
-    defaultFolder = await invoke<string>("get_default_folder");
-  } catch (e) {
-    defaultFolder = "";
-  }
+  listen("request-default-folder", async () => {
+    await initDefaultFolder();
+  });
+
+  await initDefaultFolder();
 
   // Handle file open from command line args (Rust backend)
   listen("open-file", async (event) => {
