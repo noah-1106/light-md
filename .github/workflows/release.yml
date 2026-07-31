@@ -41,7 +41,7 @@ jobs:
           echo "$MAS_P12" | base64 -d > /tmp/mas_app.p12
           security import /tmp/mas_app.p12 -k signing_temp_app.keychain -P "$MAS_P12_PASSWORD" -f pkcs12 -A -T /usr/bin/codesign -T /usr/bin/security -T /usr/bin/productbuild
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" signing_temp_app.keychain
-          security set-keychain-list -d user -s signing_temp_app.keychain login.keychain
+          security list-keychains -d user -s signing_temp_app.keychain login.keychain
           rm /tmp/mas_app.p12
 
           # Create installer keychain
@@ -51,7 +51,7 @@ jobs:
           echo "$INSTALLER_P12" | base64 -d > /tmp/mas_installer.p12
           security import /tmp/mas_installer.p12 -k signing_temp_installer.keychain -P "$INSTALLER_P12_PASSWORD" -f pkcs12 -A -T /usr/bin/codesign -T /usr/bin/security -T /usr/bin/productbuild
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" signing_temp_installer.keychain
-          security set-keychain-list -d user -s signing_temp_installer.keychain signing_temp_app.keychain login.keychain
+          security list-keychains -d user -s signing_temp_installer.keychain signing_temp_app.keychain login.keychain
           rm /tmp/mas_installer.p12
 
       - name: Build Tauri (MAS .app)
