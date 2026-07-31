@@ -25,21 +25,34 @@ jobs:
       - name: Install frontend dependencies
         run: npm install
 
-      - name: Import Mac App Distribution certificate
-        uses: apple-actions/import-codesign-certs@v4
-        with:
-          keychain: signing_temp_app
-          create-keychain: true
-          p12-file-base64: ${{ secrets.APPLE_CERTIFICATE_MAS }}
-          p12-password: ${{ secrets.APPLE_CERTIFICATE_MAS_PASSWORD }}
+      - name: Set up signing keychains
+        env:
+          MAS_P12: ${{ secrets.APPLE_CERTIFICATE_MAS }}
+          MAS_P12_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_MAS_PASSWORD }}
+          INSTALLER_P12: ${{ secrets.APPLE_CERTIFICATE_MAS_INSTALLER }}
+          INSTALLER_P12_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_MAS_INSTALLER_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
+        run: |
+          set -e
+          # Create app keychain
+          security create-keychain -p "$KEYCHAIN_PASSWORD" signing_temp_app.keychain
+          security set-keychain-settings -lut 21600 signing_temp_app.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" signing_temp_app.keychain
+          echo "$MAS_P12" | base64 -d > /tmp/mas_app.p12
+          security import /tmp/mas_app.p12 -k signing_temp_app.keychain -P "$MAS_P12_PASSWORD" -f pkcs12 -A -T /usr/bin/codesign -T /usr/bin/security -T /usr/bin/productbuild
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" signing_temp_app.keychain
+          security set-keychain-list -d user -s signing_temp_app.keychain login.keychain
+          rm /tmp/mas_app.p12
 
-      - name: Import Mac Installer Distribution certificate
-        uses: apple-actions/import-codesign-certs@v4
-        with:
-          keychain: signing_temp_installer
-          create-keychain: true
-          p12-file-base64: ${{ secrets.APPLE_CERTIFICATE_MAS_INSTALLER }}
-          p12-password: ${{ secrets.APPLE_CERTIFICATE_MAS_INSTALLER_PASSWORD }}
+          # Create installer keychain
+          security create-keychain -p "$KEYCHAIN_PASSWORD" signing_temp_installer.keychain
+          security set-keychain-settings -lut 21600 signing_temp_installer.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" signing_temp_installer.keychain
+          echo "$INSTALLER_P12" | base64 -d > /tmp/mas_installer.p12
+          security import /tmp/mas_installer.p12 -k signing_temp_installer.keychain -P "$INSTALLER_P12_PASSWORD" -f pkcs12 -A -T /usr/bin/codesign -T /usr/bin/security -T /usr/bin/productbuild
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" signing_temp_installer.keychain
+          security set-keychain-list -d user -s signing_temp_installer.keychain signing_temp_app.keychain login.keychain
+          rm /tmp/mas_installer.p12
 
       - name: Build Tauri (MAS .app)
         uses: tauri-apps/tauri-action@v0
