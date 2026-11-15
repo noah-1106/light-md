@@ -33,6 +33,7 @@
 
 ### 编辑体验
 - **实时分屏预览** — 左侧编辑，右侧实时渲染，基于 [marked](https://marked.js.org/) + [highlight.js](https://highlightjs.org/)，支持 GitHub 风格换行
+- **科学公式渲染** — 基于 KaTeX，支持 `$...$`、`$$...$$`、`\(...\)` 和 `\[...\]`，公式与代码块互不干扰
 - **语义级滚动同步** — 不是简单的比例同步，而是基于源码块级结构的精确对齐。编辑器滚动到某个标题时，预览也会精准定位到同一个标题
 - **CodeMirror 6 编辑器** — 语法高亮、行号、自动换行、深色/浅色主题
 - **多标签页** — 同时编辑多个文档，标签页显示修改状态（蓝色圆点提示未保存）
@@ -43,7 +44,8 @@
 - **自动保存** — 编辑后 1.5 秒自动保存，新文档自动以首行内容作为文件名保存到 `~/Documents/LightMD/`
 - **双击打开文件** — 注册为系统默认 `.md` 打开器，双击 Markdown 文件即可打开
 - **拖拽打开** — 直接将 `.md` 文件拖入应用窗口即可打开
-- **打开保存文件夹** — 一键在文件管理器中定位到保存目录
+- **打开当前文档所在文件夹** — 一键在文件管理器中定位到当前文档；未命名文档回退到默认保存目录
+- **外部修改自动同步** — 其他工具修改当前文档后自动刷新；如与本地编辑冲突，会暂停自动保存并由你选择保留版本
 
 ### 界面与交互
 - **深色 / 浅色主题** — 支持一键切换，跟随系统偏好
@@ -64,7 +66,7 @@
 | Windows | `Light MD_*_x64-setup.exe` / `.msi` | Windows 10+ |
 | Linux | `Light MD_*_amd64.deb` / `.AppImage` | Ubuntu/Debian 等 |
 
-> ⚠️ **注意**：当前 Release 为**未签名版本**。macOS 用户首次打开需在右键菜单选择"打开"；Windows 用户如遇 Defender 拦截，请点击"更多信息" → "仍要运行"。
+> ⚠️ **注意**：Windows 用户如遇 Defender 拦截，请点击"更多信息" → "仍要运行"。
 
 ### macOS 设置为默认 Markdown 打开器
 
@@ -121,6 +123,7 @@ npm run tauri build
 | 桌面框架 | [Tauri 2.0](https://tauri.app/) | 基于系统 WebView，包体 ~5MB |
 | 编辑器 | [CodeMirror 6](https://codemirror.net/) | Markdown 语法高亮、行号、主题 |
 | 渲染引擎 | [marked](https://marked.js.org/) | Markdown → HTML，开启 GitHub 风格换行 |
+| 公式渲染 | [KaTeX](https://katex.org/) | 本地打包的行内与块级科学公式渲染 |
 | 代码高亮 | [highlight.js](https://highlightjs.org/) | 预览区代码块语法高亮 |
 | 构建工具 | [Vite](https://vitejs.dev/) + TypeScript | 前端构建 |
 | 后端 | Rust | 文件 I/O、跨平台原生集成 |
@@ -138,6 +141,18 @@ npm run tauri build
 | VS Code | ~350 MB | 较慢 | 无（通用编辑器） |
 | MarkText | ~180 MB | 中等 | 一般 |
 | **Light MD** | **~5 MB** | **快** | **原生系统集成** |
+
+### 数学公式
+
+行内公式可使用 `$E=mc^2$` 或 `\(E=mc^2\)`。独立公式块可使用：
+
+```markdown
+$$
+\frac{a}{b} = \sqrt{c}
+$$
+```
+
+也支持 LaTeX 风格的 `\[` 与 `\]` 定界符。公式字体随应用本地打包，无需联网加载。
 
 ### 图片管理
 
@@ -183,7 +198,7 @@ light-md/
 - **拖拽/粘贴监听** — 在 CodeMirror 编辑器 DOM 上监听 `drop` 和 `paste` 事件，识别图片 MIME type 和文件扩展名
 - **后端二进制保存** — 通过 Tauri `invoke("save_image")` 将图片数据写入磁盘，自动创建文件夹
 - **文档专属文件夹** — 根据当前文档文件名生成 `[文档名].images/` 文件夹，避免多文档图片混杂
-- **预览区路径转换** — 利用 Tauri `assetProtocol` 和 `convertFileSrc`，将本地文件路径转为 WebView 可访问的安全 URL，图片即时渲染
+- **预览区路径转换** — 利用 Tauri `convertFileSrc` 和自定义 `lightmd` 协议，将相对路径、绝对路径及 URL 编码的本地图片路径转换为 WebView 可访问 URL，图片即时渲染
 
 ### 链接智能处理
 
