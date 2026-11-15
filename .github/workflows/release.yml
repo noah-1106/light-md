@@ -3,9 +3,23 @@ name: Release
 # App Store Connect uploads are manual; GitHub Releases are published separately.
 on:
   workflow_dispatch:
+    inputs:
+      operation:
+        description: Release operation
+        type: choice
+        options:
+          - mas
+          - notarize
+        default: mas
+      tag:
+        description: GitHub Release tag to notarize
+        required: false
+        default: v1.0.6
+        type: string
 
 jobs:
   publish-mas:
+    if: inputs.operation == 'mas'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -88,3 +102,75 @@ jobs:
             --file "src-tauri/target/universal-apple-darwin/release/bundle/macos/Light MD.pkg" \
             --apiKey "$APPLE_API_KEY_ID" \
             --apiIssuer "$APPLE_API_ISSUER"
+
+  notarize-dmg:
+    if: inputs.operation == 'notarize'
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download signed release asset
+        id: download
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          asset="Light.MD_${TAG#v}_aarch64.dmg"
+          gh release download "$TAG" --pattern "$asset" --dir "$RUNNER_TEMP"
+          echo "path=$RUNNER_TEMP/$asset" >> "$GITHUB_OUTPUT"
+
+      - name: Write App Store Connect API key
+        id: api-key
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+        run: |
+          set -euo pipefail
+          key_dir="$RUNNER_TEMP/notary_keys"
+          mkdir -p "$key_dir"
+          key_path="$key_dir/AuthKey_${APPLE_API_KEY_ID}.p8"
+          printf '%s\n' "$APPLE_API_KEY" | base64 -d > "$key_path"
+          chmod 600 "$key_path"
+          echo "path=$key_path" >> "$GITHUB_OUTPUT"
+
+      - name: Notarize and staple DMG
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          DMG_PATH: ${{ steps.download.outputs.path }}
+          KEY_PATH: ${{ steps.api-key.outputs.path }}
+        run: |
+          set -euo pipefail
+          xcrun notarytool submit "$DMG_PATH" \
+            --key "$KEY_PATH" \
+            --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER" \
+            --wait \
+            --timeout 30m
+          xcrun stapler staple "$DMG_PATH"
+          xcrun stapler validate "$DMG_PATH"
+          spctl -a -t open --context context:primary-signature -v "$DMG_PATH"
+
+      - name: Verify app Gatekeeper assessment
+        env:
+          DMG_PATH: ${{ steps.download.outputs.path }}
+        run: |
+          set -euo pipefail
+          mount_point="$RUNNER_TEMP/light-md-mounted"
+          mkdir -p "$mount_point"
+          hdiutil attach "$DMG_PATH" -nobrowse -readonly -mountpoint "$mount_point"
+          trap 'hdiutil detach "$mount_point" || true' EXIT
+          codesign --verify --deep --strict --verbose=2 "$mount_point/Light MD.app"
+          spctl -a -t exec -vv "$mount_point/Light MD.app"
+
+      - name: Replace GitHub Release asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+          DMG_PATH: ${{ steps.download.outputs.path }}
+        run: gh release upload "$TAG" "$DMG_PATH" --clobber
+
+      - name: Remove temporary API key
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/notary_keys"
