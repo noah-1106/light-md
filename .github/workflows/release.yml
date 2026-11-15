@@ -1,9 +1,7 @@
 name: Release
 
+# App Store Connect uploads are manual; GitHub Releases are published separately.
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
 
 jobs:
