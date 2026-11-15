@@ -113,6 +113,7 @@ jobs:
         id: download
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: noah-1106/light-md
           TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
@@ -167,6 +168,7 @@ jobs:
       - name: Replace GitHub Release asset
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: noah-1106/light-md
           TAG: ${{ inputs.tag }}
           DMG_PATH: ${{ steps.download.outputs.path }}
         run: gh release upload "$TAG" "$DMG_PATH" --clobber
