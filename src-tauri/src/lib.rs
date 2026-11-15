@@ -1,6 +1,8 @@
 use std::collections::HashMap;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::UNIX_EPOCH;
 use tauri::{AppHandle, DragDropEvent, Emitter, Manager, State};
 
 mod bookmark;
@@ -12,6 +14,136 @@ pub struct AppState {
     pub default_folder_bookmark: Mutex<Option<Vec<u8>>>,
     pub dir_bookmarks: Mutex<HashMap<String, Vec<u8>>>,
     pub bookmarks_path: Mutex<Option<PathBuf>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileRevision {
+    modified_secs: u64,
+    modified_nanos: u32,
+    size: u64,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileSnapshot {
+    name: String,
+    content: String,
+    revision: FileRevision,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileInfo {
+    name: String,
+    revision: FileRevision,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum WriteFileResult {
+    Saved {
+        revision: FileRevision,
+    },
+    Conflict {
+        #[serde(rename = "actualRevision")]
+        actual_revision: Option<FileRevision>,
+    },
+}
+
+fn file_name(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("untitled")
+        .to_string()
+}
+
+fn revision_from_metadata(metadata: &std::fs::Metadata) -> Result<FileRevision, String> {
+    let modified = metadata
+        .modified()
+        .map_err(|e| format!("read modification time failed: {}", e))?;
+    let duration = modified
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| format!("invalid modification time: {}", e))?;
+    Ok(FileRevision {
+        modified_secs: duration.as_secs(),
+        modified_nanos: duration.subsec_nanos(),
+        size: metadata.len(),
+    })
+}
+
+fn current_revision(path: &str) -> Result<Option<FileRevision>, String> {
+    match std::fs::metadata(path) {
+        Ok(metadata) => revision_from_metadata(&metadata).map(Some),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("read file metadata failed: {}", e)),
+    }
+}
+
+fn read_snapshot(path: &str) -> Result<FileSnapshot, String> {
+    for _ in 0..3 {
+        let before = current_revision(path)?.ok_or("file not found")?;
+        let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let after = current_revision(path)?.ok_or("file not found")?;
+        if before == after {
+            return Ok(FileSnapshot {
+                name: file_name(path),
+                content,
+                revision: after,
+            });
+        }
+    }
+    Err("file changed repeatedly while reading".to_string())
+}
+
+fn read_file_info(path: &str) -> Result<Option<FileInfo>, String> {
+    let Some(revision) = current_revision(path)? else {
+        return Ok(None);
+    };
+    Ok(Some(FileInfo {
+        name: file_name(path),
+        revision,
+    }))
+}
+
+fn write_with_expected_revision(
+    path: &str,
+    content: &str,
+    expected_revision: Option<FileRevision>,
+) -> Result<WriteFileResult, String> {
+    let actual_revision = current_revision(path)?;
+    if actual_revision != expected_revision {
+        return Ok(WriteFileResult::Conflict { actual_revision });
+    }
+
+    // create_new closes the overwrite window for newly generated document names.
+    if expected_revision.is_none() {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            Ok(mut file) => {
+                use std::io::Write;
+                if let Err(e) = file.write_all(content.as_bytes()) {
+                    return Err(format!("write file failed: {}", e));
+                }
+            }
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                return Ok(WriteFileResult::Conflict {
+                    actual_revision: current_revision(path)?,
+                });
+            }
+            Err(e) => return Err(format!("create file failed: {}", e)),
+        }
+    } else {
+        // This is an optimistic guard, not a cross-process atomic compare-and-swap.
+        std::fs::write(path, content).map_err(|e| format!("write file failed: {}", e))?;
+    }
+
+    let revision = current_revision(path)?.ok_or("file disappeared after writing")?;
+    Ok(WriteFileResult::Saved { revision })
 }
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
@@ -152,32 +284,25 @@ fn is_md_file(path: &Path) -> bool {
 }
 
 #[tauri::command]
-fn read_file(path: &str, state: State<AppState>) -> Result<String, String> {
+fn read_file(path: &str, state: State<AppState>) -> Result<FileSnapshot, String> {
+    with_path_access(&state, path, read_snapshot)
+}
+
+#[tauri::command]
+fn write_file(
+    path: &str,
+    content: &str,
+    expected_revision: Option<FileRevision>,
+    state: State<AppState>,
+) -> Result<WriteFileResult, String> {
     with_path_access(&state, path, |p| {
-        std::fs::read_to_string(p).map_err(|e| e.to_string())
+        write_with_expected_revision(p, content, expected_revision)
     })
 }
 
 #[tauri::command]
-fn write_file(path: &str, content: &str, state: State<AppState>) -> Result<(), String> {
-    with_path_access(&state, path, |p| std::fs::write(p, content).map_err(|e| e.to_string()))
-}
-
-#[tauri::command]
-fn get_file_info(path: &str, state: State<AppState>) -> Result<(String, u64), String> {
-    with_path_access(&state,
-        path,
-        |p| {
-            let metadata = std::fs::metadata(p).map_err(|e| e.to_string())?;
-            let size = metadata.len();
-            let name = Path::new(p)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("untitled")
-                .to_string();
-            Ok((name, size))
-        },
-    )
+fn get_file_info(path: &str, state: State<AppState>) -> Result<Option<FileInfo>, String> {
+    with_path_access(&state, path, read_file_info)
 }
 
 #[tauri::command]
@@ -233,21 +358,11 @@ fn set_default_folder(path: String, state: State<AppState>) -> Result<(), String
 }
 
 #[tauri::command]
-fn open_folder(path: &str, _app: AppHandle) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        tauri_plugin_opener::open_path(path, None::<&str>)
+fn open_folder(path: &str, state: State<AppState>) -> Result<(), String> {
+    with_path_access(&state, path, |p| {
+        tauri_plugin_opener::open_path(p, None::<&str>)
             .map_err(|e| format!("open folder failed: {}", e))
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = _app;
-        std::process::Command::new("open")
-            .arg(path)
-            .spawn()
-            .map_err(|e| e.to_string())?;
-        Ok(())
-    }
+    })
 }
 
 #[tauri::command]
@@ -303,19 +418,33 @@ fn content_type_from_path(path: &str) -> &'static str {
 }
 
 fn image_path_from_request(request: &tauri::http::Request<Vec<u8>>) -> Option<String> {
-    let path = request.uri().path();
-    let rest = path.strip_prefix("/image/")?;
-    percent_encoding::percent_decode_str(rest)
-        .decode_utf8_lossy()
-        .parse()
-        .ok()
+    let encoded = request.uri().path().strip_prefix('/')?;
+    let decoded = percent_encoding::percent_decode_str(encoded).decode_utf8_lossy();
+    Some(
+        decoded
+            .strip_prefix("image/")
+            .unwrap_or(&decoded)
+            .to_string(),
+    )
+}
+
+fn expand_home(path: String) -> String {
+    let relative = path
+        .strip_prefix("~/")
+        .or_else(|| path.strip_prefix("~\\"));
+    if let Some(relative) = relative {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(relative).to_string_lossy().to_string();
+        }
+    }
+    path
 }
 
 fn handle_image_request(
     app_handle: &AppHandle,
     request: &tauri::http::Request<Vec<u8>>,
 ) -> Result<tauri::http::Response<Vec<u8>>, Box<dyn std::error::Error>> {
-    let path = image_path_from_request(request).ok_or("invalid image path")?;
+    let path = expand_home(image_path_from_request(request).ok_or("invalid image path")?);
     let state = app_handle.state::<AppState>();
     let bytes = with_path_access(&state,
         &path,
@@ -462,4 +591,166 @@ pub fn run() {
                 let _ = (app_handle, event);
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_path(label: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "light-md-{}-{}-{}.md",
+            label,
+            std::process::id(),
+            nonce
+        ))
+    }
+
+    fn saved_revision(result: WriteFileResult) -> FileRevision {
+        match result {
+            WriteFileResult::Saved { revision } => revision,
+            other => panic!("expected saved result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_tauri_image_protocol_urls() {
+        let cases = [
+            (
+                "lightmd://localhost/%2FUsers%2Fme%2FMy%20File.png",
+                "/Users/me/My File.png",
+            ),
+            (
+                "lightmd://localhost/%2FUsers%2Fme%2Fa%2520b.png",
+                "/Users/me/a%20b.png",
+            ),
+            (
+                "http://lightmd.localhost/C%3A%5Cimages%5Ca.png",
+                "C:\\images\\a.png",
+            ),
+            ("lightmd://image/%2Ftmp%2Fa.png", "/tmp/a.png"),
+        ];
+
+        for (url, expected) in cases {
+            let request = tauri::http::Request::builder()
+                .uri(url)
+                .body(vec![])
+                .unwrap();
+            assert_eq!(image_path_from_request(&request).as_deref(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn reads_a_consistent_named_snapshot() {
+        let path = temp_path("snapshot");
+        let path_str = path.to_string_lossy().to_string();
+        std::fs::write(&path, "snapshot content").unwrap();
+
+        let snapshot = read_snapshot(&path_str).unwrap();
+        assert_eq!(snapshot.name, path.file_name().unwrap().to_string_lossy());
+        assert_eq!(snapshot.content, "snapshot content");
+        assert_eq!(
+            Some(snapshot.revision),
+            current_revision(&path_str).unwrap()
+        );
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn rejects_stale_writes_without_changing_disk_content() {
+        let path = temp_path("revision");
+        let path_str = path.to_string_lossy().to_string();
+        let first = saved_revision(
+            write_with_expected_revision(&path_str, "one", None).unwrap(),
+        );
+        let second = saved_revision(
+            write_with_expected_revision(&path_str, "second version", Some(first)).unwrap(),
+        );
+
+        let conflict = write_with_expected_revision(&path_str, "stale", Some(first)).unwrap();
+        assert!(matches!(
+            conflict,
+            WriteFileResult::Conflict {
+                actual_revision: Some(revision)
+            } if revision == second
+        ));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second version");
+
+        saved_revision(
+            write_with_expected_revision(&path_str, "latest", Some(second)).unwrap(),
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "latest");
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn new_documents_do_not_overwrite_existing_files() {
+        let path = temp_path("create-new");
+        let path_str = path.to_string_lossy().to_string();
+        std::fs::write(&path, "existing").unwrap();
+
+        let result = write_with_expected_revision(&path_str, "replacement", None).unwrap();
+        assert!(matches!(
+            result,
+            WriteFileResult::Conflict {
+                actual_revision: Some(_)
+            }
+        ));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "existing");
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn deleted_files_conflict_and_can_be_recreated() {
+        let path = temp_path("deleted");
+        let path_str = path.to_string_lossy().to_string();
+        let revision = saved_revision(
+            write_with_expected_revision(&path_str, "original", None).unwrap(),
+        );
+        std::fs::remove_file(&path).unwrap();
+
+        let result = write_with_expected_revision(&path_str, "local", Some(revision)).unwrap();
+        assert!(matches!(
+            result,
+            WriteFileResult::Conflict {
+                actual_revision: None
+            }
+        ));
+        assert!(!path.exists());
+
+        saved_revision(write_with_expected_revision(&path_str, "local", None).unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "local");
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn serializes_write_results_for_the_frontend_contract() {
+        let conflict = serde_json::to_value(WriteFileResult::Conflict {
+            actual_revision: None,
+        })
+        .unwrap();
+        assert_eq!(conflict["status"], "conflict");
+        assert!(conflict.as_object().unwrap().contains_key("actualRevision"));
+
+        let saved = serde_json::to_value(WriteFileResult::Saved {
+            revision: FileRevision {
+                modified_secs: 10,
+                modified_nanos: 20,
+                size: 30,
+            },
+        })
+        .unwrap();
+        assert_eq!(saved["status"], "saved");
+        assert_eq!(saved["revision"]["modifiedSecs"], 10);
+        assert_eq!(saved["revision"]["modifiedNanos"], 20);
+        assert_eq!(saved["revision"]["size"], 30);
+    }
 }

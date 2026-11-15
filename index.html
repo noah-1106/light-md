@@ -26,7 +26,7 @@
           </button>
         </div>
         <div class="toolbar-right">
-          <button id="btn-folder" title="打开默认文件夹">
+          <button id="btn-folder" title="打开当前文档所在文件夹">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
             </svg>
@@ -42,6 +42,14 @@
 
       <!-- Tab Bar -->
       <div class="tab-bar" id="tab-bar"></div>
+
+      <div class="sync-conflict" id="sync-conflict" role="status" hidden>
+        <span id="conflict-message"></span>
+        <div class="conflict-actions">
+          <button type="button" id="conflict-reload">从磁盘重新加载</button>
+          <button type="button" id="conflict-overwrite">用当前内容覆盖磁盘</button>
+        </div>
+      </div>
 
       <!-- Editor + Preview -->
       <div class="main" id="main-area">

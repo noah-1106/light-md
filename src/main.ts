@@ -1,20 +1,52 @@
+import "katex/dist/katex.min.css";
 import "./styles.css";
 import { EditorView, ViewUpdate } from "@codemirror/view";
 import { EditorState, Compartment } from "@codemirror/state";
 import { markdown } from "@codemirror/lang-markdown";
 import { basicSetup } from "codemirror";
 import { oneDark } from "@codemirror/theme-one-dark";
-import { marked } from "marked";
 import hljs from "highlight.js";
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { openUrl, openPath } from "@tauri-apps/plugin-opener";
-
-marked.use({ breaks: true });
+import { renderMarkdown, scanBlocks } from "./markdown";
+import {
+  directoryName,
+  formatImageMarkdown,
+  joinPath,
+  relativePathWithin,
+  resolveImagePath,
+} from "./file-path";
 
 // ─── Types ───
+interface FileRevision {
+  modifiedSecs: number;
+  modifiedNanos: number;
+  size: number;
+}
+
+interface FileSnapshot {
+  name: string;
+  content: string;
+  revision: FileRevision;
+}
+
+interface FileInfo {
+  name: string;
+  revision: FileRevision;
+}
+
+type WriteFileResult =
+  | { status: "saved"; revision: FileRevision }
+  | { status: "conflict"; actualRevision: FileRevision | null };
+
+interface FileConflict {
+  kind: "changed" | "deleted";
+  observedRevision: FileRevision | null;
+}
+
 interface Tab {
   id: string;
   filename: string;
@@ -22,7 +54,15 @@ interface Tab {
   path: string | null;
   content: string;
   diskContent: string;
+  diskRevision: FileRevision | null;
   modified: boolean;
+  editVersion: number;
+  autoSaveTimer: ReturnType<typeof setTimeout> | null;
+  saveInFlight: boolean;
+  saveQueued: boolean;
+  pollInFlight: boolean;
+  reloadInFlight: boolean;
+  conflict: FileConflict | null;
 }
 
 // ─── State ───
@@ -34,9 +74,10 @@ let currentTheme: "light" | "dark" = window.matchMedia("(prefers-color-scheme: d
   : "light";
 const themeCompartment = new Compartment();
 const fontSizeCompartment = new Compartment();
-let autoSaveTimer: ReturnType<typeof setTimeout> | null = null;
 let defaultFolder: string = "";
 let tabCounter = 0;
+let previewGeneration = 0;
+let applyingProgrammaticUpdate = false;
 let zoomLevel = 1.0;
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 2.0;
@@ -50,6 +91,10 @@ const mainArea = document.getElementById("main-area")!;
 const welcomeScreen = document.getElementById("welcome")!;
 const statusPathEl = document.getElementById("status-path")!;
 const statusInfoEl = document.getElementById("status-info")!;
+const conflictBanner = document.getElementById("sync-conflict")!;
+const conflictMessage = document.getElementById("conflict-message")!;
+const conflictReloadButton = document.getElementById("conflict-reload") as HTMLButtonElement;
+const conflictOverwriteButton = document.getElementById("conflict-overwrite") as HTMLButtonElement;
 
 // ─── Helpers ───
 function genId() {
@@ -73,77 +118,19 @@ function stripExt(name: string): string {
   return i > 0 ? name.slice(0, i) : name;
 }
 
-function scanBlocks(content: string): number[] {
-  const lines = content.split("\n");
-  const blockLines: number[] = [];
-  let i = 0;
-  while (i < lines.length) {
-    const trimmed = lines[i].trim();
-    if (trimmed === "") {
-      i++;
-      continue;
-    }
-    const start = i + 1; // 1-based line number
-    if (trimmed.startsWith("#")) {
-      blockLines.push(start);
-      i++;
-    } else if (trimmed.startsWith("```")) {
-      blockLines.push(start);
-      i++;
-      while (i < lines.length && !lines[i].trim().startsWith("```")) i++;
-      i++;
-    } else if (trimmed.startsWith(">")) {
-      blockLines.push(start);
-      i++;
-      while (i < lines.length && (lines[i].trim().startsWith(">") || lines[i].trim() === "")) i++;
-    } else if (trimmed.startsWith("- ") || trimmed.startsWith("* ") || /^\d+\.\s/.test(trimmed)) {
-      blockLines.push(start);
-      i++;
-      while (i < lines.length) {
-        const l = lines[i];
-        if (l.trim() === "") {
-          if (
-            i + 1 < lines.length &&
-            (lines[i + 1].trim().startsWith("- ") ||
-              lines[i + 1].trim().startsWith("* ") ||
-              /^\d+\.\s/.test(lines[i + 1].trim()) ||
-              /^\s+\S/.test(lines[i + 1]))
-          ) {
-            i++;
-            continue;
-          }
-          break;
-        }
-        if (
-          l.trim().startsWith("- ") ||
-          l.trim().startsWith("* ") ||
-          /^\d+\.\s/.test(l.trim()) ||
-          /^\s+/.test(l)
-        ) {
-          i++;
-          continue;
-        }
-        break;
-      }
-    } else if (trimmed.startsWith("|")) {
-      blockLines.push(start);
-      i++;
-      while (i < lines.length && lines[i].trim().startsWith("|")) i++;
-    } else if (trimmed === "---" || trimmed === "***" || trimmed === "___") {
-      blockLines.push(start);
-      i++;
-    } else {
-      // paragraph or other block
-      blockLines.push(start);
-      i++;
-      while (i < lines.length && lines[i].trim() !== "") i++;
-    }
-  }
-  return blockLines;
-}
-
 function getActiveTab(): Tab | undefined {
   return tabs.find((t) => t.id === activeTabId);
+}
+
+function getTab(id: string): Tab | undefined {
+  return tabs.find((tab) => tab.id === id);
+}
+
+function revisionsEqual(a: FileRevision | null, b: FileRevision | null): boolean {
+  if (!a || !b) return a === b;
+  return a.modifiedSecs === b.modifiedSecs &&
+    a.modifiedNanos === b.modifiedNanos &&
+    a.size === b.size;
 }
 
 function makeFilenameFromContent(content: string): string {
@@ -287,41 +274,257 @@ function showWelcome() {
   tabBar.style.display = "none";
   statusPathEl.textContent = "-";
   updateStatus(1, 1);
+  updateConflictBanner();
 }
 
-// ─── Auto Save ───
-async function doSave() {
+// ─── Auto Save & External Changes ───
+function updateConflictBanner() {
   const tab = getActiveTab();
-  if (!tab) return;
+  const conflict = tab?.conflict;
+  conflictBanner.hidden = !conflict;
+  if (!tab || !conflict) return;
+
+  conflictMessage.textContent = conflict.kind === "deleted"
+    ? `“${tab.filename}” 已在磁盘中被删除，编辑内容仍保留。自动保存已暂停。`
+    : `“${tab.filename}” 的磁盘版本与当前编辑冲突。自动保存已暂停。`;
+  const busy = tab.saveInFlight || tab.reloadInFlight;
+  conflictReloadButton.disabled = busy || conflict.kind === "deleted";
+  conflictOverwriteButton.disabled = busy;
+  conflictReloadButton.textContent = "从磁盘重新加载";
+  conflictOverwriteButton.textContent = conflict.kind === "deleted"
+    ? "从编辑器重新创建"
+    : "用当前内容覆盖磁盘";
+}
+
+function markConflict(tab: Tab, observedRevision: FileRevision | null) {
+  if (tab.autoSaveTimer) {
+    clearTimeout(tab.autoSaveTimer);
+    tab.autoSaveTimer = null;
+  }
+  tab.saveQueued = false;
+  tab.modified = true;
+  tab.conflict = {
+    kind: observedRevision ? "changed" : "deleted",
+    observedRevision,
+  };
+  renderTabs();
+  updateConflictBanner();
+}
+
+function scheduleAutoSave(tabId: string, contentSnapshot: string) {
+  const tab = getTab(tabId);
+  if (!tab || tab.conflict) return;
+  if (tab.autoSaveTimer) clearTimeout(tab.autoSaveTimer);
+  if (tab.saveInFlight) {
+    tab.saveQueued = true;
+    return;
+  }
+  tab.autoSaveTimer = setTimeout(() => {
+    tab.autoSaveTimer = null;
+    void saveTab(tabId, contentSnapshot, tab.diskRevision);
+  }, 1500);
+}
+
+async function saveTab(
+  tabId: string,
+  contentSnapshot: string,
+  expectedRevision: FileRevision | null,
+  resolveConflict = false,
+) {
+  const initialTab = getTab(tabId);
+  if (!initialTab || (initialTab.conflict && !resolveConflict)) return;
+  if (initialTab.saveInFlight) {
+    initialTab.saveQueued = true;
+    return;
+  }
+  if (initialTab.content !== contentSnapshot) {
+    if (initialTab.modified && !initialTab.conflict) scheduleAutoSave(tabId, initialTab.content);
+    return;
+  }
+
+  initialTab.saveInFlight = true;
+  initialTab.saveQueued = false;
+  updateConflictBanner();
+
   try {
-    let path = tab.path;
+    let path = initialTab.path;
     if (!path) {
       // New file: auto-generate filename from first line
-      const filename = makeFilenameFromContent(tab.content);
+      const filename = makeFilenameFromContent(initialTab.content);
       const safeName = filename.replace(/\//g, "_");
-      path = defaultFolder ? `${defaultFolder}/${safeName}` : safeName;
-      tab.path = path;
-      tab.fullName = safeName;
-      tab.filename = stripExt(safeName);
+      path = joinPath(defaultFolder, safeName);
+      initialTab.path = path;
+      initialTab.fullName = safeName;
+      initialTab.filename = stripExt(safeName);
       await invoke("set_current_file", { path });
       renderTabs();
     }
-    await invoke("write_file", { path, content: tab.content });
-    tab.diskContent = tab.content;
-    tab.modified = false;
-    renderTabs();
+
+    const result = await invoke<WriteFileResult>("write_file", {
+      path,
+      content: contentSnapshot,
+      expectedRevision,
+    });
+    const tab = getTab(tabId);
+    if (!tab) return;
+
+    if (result.status === "saved") {
+      tab.diskContent = contentSnapshot;
+      tab.diskRevision = result.revision;
+      tab.modified = tab.content !== contentSnapshot;
+      if (resolveConflict) tab.conflict = null;
+      renderTabs();
+    } else {
+      markConflict(tab, result.actualRevision);
+    }
   } catch (e) {
     console.error("auto save failed:", e);
+    const tab = getTab(tabId);
+    if (tab) tab.modified = true;
+    if (resolveConflict) alert(`保存失败: ${e}`);
+  } finally {
+    const tab = getTab(tabId);
+    if (tab) {
+      tab.saveInFlight = false;
+      const needsTrailingSave = tab.saveQueued ||
+        (tab.modified && tab.content !== contentSnapshot && !tab.conflict);
+      tab.saveQueued = false;
+      if (needsTrailingSave && !tab.conflict) scheduleAutoSave(tab.id, tab.content);
+      renderTabs();
+      updateConflictBanner();
+    }
   }
 }
 
-function scheduleAutoSave() {
-  if (autoSaveTimer) clearTimeout(autoSaveTimer);
-  autoSaveTimer = setTimeout(doSave, 1500);
+async function overwriteConflict(tabId: string) {
+  const initialTab = getTab(tabId);
+  if (!initialTab?.path || !initialTab.conflict ||
+      initialTab.saveInFlight || initialTab.reloadInFlight) return;
+  const path = initialTab.path;
+  initialTab.reloadInFlight = true;
+  updateConflictBanner();
+
+  try {
+    const info = await invoke<FileInfo | null>("get_file_info", { path });
+    const tab = getTab(tabId);
+    if (!tab?.conflict || tab.path !== path) return;
+    tab.conflict = {
+      kind: info ? "changed" : "deleted",
+      observedRevision: info?.revision ?? null,
+    };
+    tab.reloadInFlight = false;
+    await saveTab(tab.id, tab.content, tab.conflict.observedRevision, true);
+  } catch (e) {
+    console.error("conflict resolution failed:", e);
+    alert(`保存失败: ${e}`);
+  } finally {
+    const tab = getTab(tabId);
+    if (tab) {
+      tab.reloadInFlight = false;
+      updateConflictBanner();
+    }
+  }
+}
+
+async function reloadTabFromDisk(tabId: string, mode: "clean" | "conflict") {
+  const initialTab = getTab(tabId);
+  if (!initialTab?.path || initialTab.reloadInFlight || initialTab.saveInFlight) return;
+  if (mode === "clean" && (initialTab.modified || initialTab.conflict)) return;
+  if (mode === "conflict" && !initialTab.conflict) return;
+
+  const path = initialTab.path;
+  const baselineRevision = initialTab.diskRevision;
+  const startingContent = initialTab.content;
+  const startingVersion = initialTab.editVersion;
+  if (initialTab.autoSaveTimer) {
+    clearTimeout(initialTab.autoSaveTimer);
+    initialTab.autoSaveTimer = null;
+  }
+  initialTab.saveQueued = false;
+  initialTab.reloadInFlight = true;
+  updateConflictBanner();
+
+  try {
+    const snapshot = await invoke<FileSnapshot>("read_file", { path });
+    const tab = getTab(tabId);
+    if (!tab || tab.path !== path) return;
+
+    const localChanged = tab.content !== startingContent || tab.editVersion !== startingVersion;
+    const baselineChanged = !revisionsEqual(tab.diskRevision, baselineRevision);
+    if ((mode === "clean" && (localChanged || baselineChanged || tab.saveInFlight)) ||
+        (mode === "conflict" && localChanged)) {
+      if (localChanged || tab.modified) markConflict(tab, snapshot.revision);
+      return;
+    }
+
+    const previewTop = activeTabId === tab.id
+      ? document.getElementById("preview-pane")!.scrollTop
+      : null;
+    tab.content = snapshot.content;
+    tab.diskContent = snapshot.content;
+    tab.diskRevision = snapshot.revision;
+    tab.fullName = snapshot.name;
+    tab.filename = stripExt(snapshot.name);
+    tab.modified = false;
+    tab.conflict = null;
+    tab.editVersion++;
+
+    if (activeTabId === tab.id) {
+      installActiveEditor(tab, true);
+      schedulePreviewRender(tab, previewTop ?? undefined);
+      const pos = editor.state.selection.main.head;
+      const line = editor.state.doc.lineAt(pos);
+      updateStatus(line.number, pos - line.from + 1);
+    }
+    renderTabs();
+  } catch (e) {
+    console.error("reload failed:", e);
+    if (mode === "conflict") alert(`重新加载失败: ${e}`);
+  } finally {
+    const tab = getTab(tabId);
+    if (tab) {
+      tab.reloadInFlight = false;
+      updateConflictBanner();
+    }
+  }
+}
+
+async function checkExternalFile(tabId: string) {
+  const tab = getTab(tabId);
+  if (!tab?.path || !tab.diskRevision || tab.conflict ||
+      tab.saveInFlight || tab.pollInFlight || tab.reloadInFlight) return;
+
+  const path = tab.path;
+  const baselineRevision = tab.diskRevision;
+  const startingVersion = tab.editVersion;
+  tab.pollInFlight = true;
+
+  try {
+    const info = await invoke<FileInfo | null>("get_file_info", { path });
+    const current = getTab(tabId);
+    if (!current || current.path !== path ||
+        !revisionsEqual(current.diskRevision, baselineRevision)) return;
+
+    if (!info) {
+      markConflict(current, null);
+      return;
+    }
+    if (revisionsEqual(info.revision, baselineRevision)) return;
+    if (current.modified || current.editVersion !== startingVersion || current.saveInFlight) {
+      markConflict(current, info.revision);
+      return;
+    }
+    await reloadTabFromDisk(tabId, "clean");
+  } catch (e) {
+    console.error("external change check failed:", e);
+  } finally {
+    const current = getTab(tabId);
+    if (current) current.pollInFlight = false;
+  }
 }
 
 // ─── Editor ───
-function createEditorState(content: string): EditorState {
+function createEditorState(content: string, tabId: string): EditorState {
   const isDark = getEffectiveTheme() === "dark";
   return EditorState.create({
     doc: content,
@@ -332,17 +535,18 @@ function createEditorState(content: string): EditorState {
       themeCompartment.of(isDark ? oneDark : []),
       fontSizeCompartment.of(getEditorFontSizeExtension()),
       EditorView.updateListener.of((update: ViewUpdate) => {
-        if (update.docChanged) {
-          const tab = getActiveTab();
-          if (!tab) return;
+        const tab = getTab(tabId);
+        if (!tab) return;
+        if (update.docChanged && !applyingProgrammaticUpdate) {
           const text = update.state.doc.toString();
           tab.content = text;
+          tab.editVersion++;
           tab.modified = text !== tab.diskContent;
           renderTabs();
-          previewRender(text);
-          scheduleAutoSave();
+          if (activeTabId === tabId) schedulePreviewRender(tab);
+          if (!tab.conflict) scheduleAutoSave(tabId, text);
         }
-        if (update.selectionSet) {
+        if (update.selectionSet && activeTabId === tabId) {
           const pos = update.state.selection.main.head;
           const line = update.state.doc.lineAt(pos);
           updateStatus(line.number, pos - line.from + 1);
@@ -352,16 +556,54 @@ function createEditorState(content: string): EditorState {
   });
 }
 
-function initEditor() {
+function initEditor(tabId: string) {
   if (editor) return;
-  editor = new EditorView({ state: createEditorState(""), parent: editorPane });
+  editor = new EditorView({ state: createEditorState("", tabId), parent: editorPane });
   initImageDrop();
   initImagePaste();
 }
 
+function installActiveEditor(tab: Tab, preserveView: boolean) {
+  initEditor(tab.id);
+  const cursor = preserveView ? editor.state.selection.main.head : 0;
+  const scrollTop = preserveView ? editor.scrollDOM.scrollTop : 0;
+  applyingProgrammaticUpdate = true;
+  try {
+    editor.setState(createEditorState(tab.content, tab.id));
+    if (preserveView) {
+      editor.dispatch({ selection: { anchor: Math.min(cursor, tab.content.length) } });
+    }
+  } finally {
+    applyingProgrammaticUpdate = false;
+  }
+  editor.scrollDOM.scrollTop = scrollTop;
+  applyTheme();
+
+  if (preserveView) {
+    const version = tab.editVersion;
+    requestAnimationFrame(() => {
+      if (activeTabId === tab.id && tab.editVersion === version) {
+        editor.scrollDOM.scrollTop = scrollTop;
+      }
+    });
+  }
+}
+
 // ─── Preview ───
-const previewRender = debounce(async (content: string) => {
-  const html = await marked.parse(content);
+function schedulePreviewRender(tab: Tab, restorePreviewScroll?: number) {
+  const generation = ++previewGeneration;
+  previewRender(tab.content, tab.id, tab.path, generation, restorePreviewScroll);
+}
+
+const previewRender = debounce(async (
+  content: string,
+  tabId: string,
+  documentPath: string | null,
+  generation: number,
+  restorePreviewScroll?: number,
+) => {
+  const html = await renderMarkdown(content);
+  if (generation !== previewGeneration || activeTabId !== tabId) return;
   previewContent.innerHTML = html;
 
   // Attach source line numbers to rendered blocks for scroll sync
@@ -375,37 +617,23 @@ const previewRender = debounce(async (content: string) => {
     hljs.highlightElement(block as HTMLElement);
   });
 
-  fixImageSrcs();
+  fixImageSrcs(documentPath);
   attachLinkHandlers();
+  if (restorePreviewScroll !== undefined) {
+    document.getElementById("preview-pane")!.scrollTop = restorePreviewScroll;
+  }
 }, 200);
 
-function resolveImagePath(src: string): string | null {
-  if (!src || /^https?:|^data:/i.test(src)) return src;
-  if (src.startsWith("/")) return src;
-  if (src.startsWith("~")) {
-    const home = defaultFolder.split("/Documents")[0];
-    return src.replace("~", home);
-  }
-  const tab = getActiveTab();
-  if (tab?.path) {
-    const base = tab.path.slice(0, tab.path.lastIndexOf("/") + 1);
-    return base + src;
-  }
-  return defaultFolder ? `${defaultFolder}/${src}` : src;
-}
-
 function getImageUrl(absPath: string): string {
-  return `lightmd://image/${encodeURIComponent(absPath)}`;
+  return convertFileSrc(absPath, "lightmd");
 }
 
-function fixImageSrcs() {
+function fixImageSrcs(documentPath: string | null) {
   previewContent.querySelectorAll("img").forEach((img) => {
     const src = img.getAttribute("src");
     if (!src) return;
-    const abs = resolveImagePath(src);
-    if (abs && abs !== src && !/^https?:|^data:/i.test(abs)) {
-      img.src = getImageUrl(abs);
-    }
+    const abs = resolveImagePath(src, documentPath, defaultFolder);
+    if (abs) img.src = getImageUrl(abs);
   });
 }
 
@@ -441,7 +669,12 @@ function attachLinkHandlers() {
 }
 
 // ─── Tab Operations ───
-function newTab(content = "", path: string | null = null, fullName = "未命名.md") {
+function newTab(
+  content = "",
+  path: string | null = null,
+  fullName = "未命名.md",
+  diskRevision: FileRevision | null = null,
+) {
   const tab: Tab = {
     id: genId(),
     filename: stripExt(fullName),
@@ -449,7 +682,15 @@ function newTab(content = "", path: string | null = null, fullName = "未命名.
     path,
     content,
     diskContent: content,
+    diskRevision,
     modified: false,
+    editVersion: 0,
+    autoSaveTimer: null,
+    saveInFlight: false,
+    saveQueued: false,
+    pollInFlight: false,
+    reloadInFlight: false,
+    conflict: null,
   };
   tabs.push(tab);
   switchTab(tab.id);
@@ -457,16 +698,16 @@ function newTab(content = "", path: string | null = null, fullName = "未命名.
 }
 
 function switchTab(id: string) {
-  const tab = tabs.find((t) => t.id === id);
+  const tab = getTab(id);
   if (!tab) return;
 
   activeTabId = id;
-  initEditor();
-  editor.setState(createEditorState(tab.content));
-  applyTheme();
-  previewRender(tab.content);
+  installActiveEditor(tab, false);
+  schedulePreviewRender(tab);
   updateStatus(1, 1);
   renderTabs();
+  updateConflictBanner();
+  void checkExternalFile(id);
 }
 
 async function closeTab(id: string) {
@@ -479,6 +720,7 @@ async function closeTab(id: string) {
     if (!ok) return;
   }
 
+  if (tab.autoSaveTimer) clearTimeout(tab.autoSaveTimer);
   tabs.splice(idx, 1);
 
   if (activeTabId === id) {
@@ -517,18 +759,20 @@ async function loadFile(path: string) {
     return;
   }
   try {
-    const content = await invoke<string>("read_file", { path });
-    const [name] = await invoke<[string, number]>("get_file_info", { path });
-    newTab(content, path, name);
+    const snapshot = await invoke<FileSnapshot>("read_file", { path });
+    newTab(snapshot.content, path, snapshot.name, snapshot.revision);
   } catch (e) {
     alert(`\u6253\u5f00\u6587\u4ef6\u5931\u8d25: ${e}`);
   }
 }
 
-async function openDefaultFolder() {
-  if (!defaultFolder) return;
+async function openActiveFolder() {
+  const tab = getActiveTab();
+  const documentFolder = tab?.path ? directoryName(tab.path) : "";
+  const folder = documentFolder || defaultFolder;
+  if (!folder) return;
   try {
-    await invoke("open_folder", { path: defaultFolder });
+    await invoke("open_folder", { path: folder });
   } catch (e) {
     console.error("open folder failed:", e);
   }
@@ -587,32 +831,26 @@ function generateImageFilename(ext: string): string {
 function getImageSaveDir(): string {
   const tab = getActiveTab();
   if (tab?.path) {
-    const lastSlash = tab.path.lastIndexOf("/");
-    const docDir = lastSlash >= 0 ? tab.path.slice(0, lastSlash) : defaultFolder;
+    const docDir = directoryName(tab.path) || defaultFolder;
     const docName = stripExt(tab.fullName) || "未命名";
-    return `${docDir}/${docName}.images`;
+    return joinPath(docDir, `${docName}.images`);
   }
-  return `${defaultFolder}/images`;
+  return joinPath(defaultFolder, "images");
 }
 
 function getImagePathForMarkdown(savedPath: string): string {
   const tab = getActiveTab();
   if (tab?.path) {
-    const docDir = tab.path.slice(0, tab.path.lastIndexOf("/") + 1);
-    if (savedPath.startsWith(docDir)) {
-      return savedPath.slice(docDir.length);
-    }
+    const relative = relativePathWithin(savedPath, directoryName(tab.path));
+    if (relative !== null) return relative;
   }
-  if (defaultFolder && savedPath.startsWith(defaultFolder)) {
-    const rel = savedPath.slice(defaultFolder.length);
-    return rel.startsWith("/") ? `.${rel}` : `./${rel}`;
-  }
-  return savedPath;
+  const relativeToDefault = relativePathWithin(savedPath, defaultFolder);
+  return relativeToDefault !== null ? `./${relativeToDefault}` : savedPath;
 }
 
 async function saveImageToDisk(data: Uint8Array, filename: string): Promise<string | null> {
   const dir = getImageSaveDir();
-  const path = `${dir}/${filename}`;
+  const path = joinPath(dir, filename);
   try {
     await invoke("save_image", { path, data: Array.from(data) });
     return path;
@@ -624,7 +862,7 @@ async function saveImageToDisk(data: Uint8Array, filename: string): Promise<stri
 
 function insertImageMarkdown(savedPath: string, alt: string = "image") {
   const path = getImagePathForMarkdown(savedPath);
-  const markdown = `![${alt}](${path})`;
+  const markdown = formatImageMarkdown(path, alt);
   const pos = editor.state.selection.main.head;
   editor.dispatch({
     changes: { from: pos, insert: markdown },
@@ -872,8 +1110,25 @@ async function init() {
   // Buttons
   document.getElementById("btn-new")!.addEventListener("click", () => newTab());
   document.getElementById("btn-open")!.addEventListener("click", openFileDialog);
-  document.getElementById("btn-folder")!.addEventListener("click", openDefaultFolder);
+  document.getElementById("btn-folder")!.addEventListener("click", openActiveFolder);
   document.getElementById("btn-theme")!.addEventListener("click", cycleTheme);
+  conflictReloadButton.addEventListener("click", () => {
+    const tab = getActiveTab();
+    if (tab?.conflict) void reloadTabFromDisk(tab.id, "conflict");
+  });
+  conflictOverwriteButton.addEventListener("click", () => {
+    const tab = getActiveTab();
+    if (tab?.conflict) void overwriteConflict(tab.id);
+  });
+
+  const checkActiveFile = () => {
+    if (activeTabId) void checkExternalFile(activeTabId);
+  };
+  window.addEventListener("focus", checkActiveFile);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") checkActiveFile();
+  });
+  window.setInterval(checkActiveFile, 2000);
 
   // Welcome screen
   document.getElementById("welcome-new")!.addEventListener("click", () => newTab());
