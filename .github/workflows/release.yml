@@ -86,12 +86,12 @@ jobs:
           trap 'rm -f "$PROFILE_PATH"' EXIT
           printf '%s\n' "$PROVISIONING_PROFILE" | base64 -d > "$PROFILE_PATH"
           chmod 600 "$PROFILE_PATH"
-          cp "$PROFILE_PATH" "$APP_PATH/Contents/embedded.provisioningprofile"
+          cp "$PROFILE_PATH" "$APP_PATH/Contents/embedded.provisionprofile"
           codesign --force --sign "$APP_SIGNING_IDENTITY" \
             --entitlements "src-tauri/Entitlements.mas.plist" \
             --timestamp=none \
             "$APP_PATH"
-          cmp "$PROFILE_PATH" "$APP_PATH/Contents/embedded.provisioningprofile"
+          cmp "$PROFILE_PATH" "$APP_PATH/Contents/embedded.provisionprofile"
           codesign --verify --deep --strict --verbose=2 "$APP_PATH"
 
       - name: Build MAS installer .pkg
