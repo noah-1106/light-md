@@ -75,14 +75,35 @@ jobs:
         with:
           args: '--target universal-apple-darwin --bundles app'
 
+      - name: Embed Mac App Store provisioning profile
+        env:
+          PROVISIONING_PROFILE: ${{ secrets.APPLE_PROVISIONING_PROFILE }}
+          APP_SIGNING_IDENTITY: "3rd Party Mac Developer Application: Tan Zaichao (UWJL48X4C8)"
+        run: |
+          set -euo pipefail
+          APP_PATH="src-tauri/target/universal-apple-darwin/release/bundle/macos/Light MD.app"
+          PROFILE_PATH="$RUNNER_TEMP/Light_MD_Mac_App_Store.provisionprofile"
+          trap 'rm -f "$PROFILE_PATH"' EXIT
+          printf '%s\n' "$PROVISIONING_PROFILE" | base64 -d > "$PROFILE_PATH"
+          chmod 600 "$PROFILE_PATH"
+          cp "$PROFILE_PATH" "$APP_PATH/Contents/embedded.provisioningprofile"
+          codesign --force --sign "$APP_SIGNING_IDENTITY" \
+            --entitlements "src-tauri/Entitlements.mas.plist" \
+            --timestamp=none \
+            "$APP_PATH"
+          cmp "$PROFILE_PATH" "$APP_PATH/Contents/embedded.provisioningprofile"
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+
       - name: Build MAS installer .pkg
         env:
           INSTALLER_IDENTITY: "3rd Party Mac Developer Installer: Tan Zaichao (UWJL48X4C8)"
         run: |
+          set -euo pipefail
           APP_PATH="src-tauri/target/universal-apple-darwin/release/bundle/macos/Light MD.app"
           PKG_PATH="src-tauri/target/universal-apple-darwin/release/bundle/macos/Light MD.pkg"
           mkdir -p "src-tauri/target/universal-apple-darwin/release/bundle/macos"
           productbuild --component "$APP_PATH" /Applications "$PKG_PATH" --sign "$INSTALLER_IDENTITY"
+          pkgutil --check-signature "$PKG_PATH"
 
       - name: Write App Store Connect API key
         env:
