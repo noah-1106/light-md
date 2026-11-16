@@ -87,6 +87,12 @@ jobs:
           printf '%s\n' "$PROVISIONING_PROFILE" | base64 -d > "$PROFILE_PATH"
           chmod 600 "$PROFILE_PATH"
           cp "$PROFILE_PATH" "$APP_PATH/Contents/embedded.provisionprofile"
+          chmod 644 "$APP_PATH/Contents/embedded.provisionprofile"
+          non_readable=$(find "$APP_PATH" -type f ! -perm -044 -print)
+          if [ -n "$non_readable" ]; then
+            printf 'Files not readable by all users:\n%s\n' "$non_readable" >&2
+            exit 1
+          fi
           codesign --force --sign "$APP_SIGNING_IDENTITY" \
             --entitlements "src-tauri/Entitlements.mas.plist" \
             --timestamp=none \
