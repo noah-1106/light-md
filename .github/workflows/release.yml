@@ -17,9 +17,9 @@ on:
         default: v1.0.6
         type: string
       build_number:
-        description: MAS CFBundleVersion (must be unique per upload)
+        description: MAS CFBundleVersion (unique; at most three numeric components)
         required: true
-        default: 1.0.6.1
+        default: 7
         type: string
 
 jobs:
@@ -87,6 +87,10 @@ jobs:
           set -euo pipefail
           PLIST="src-tauri/target/universal-apple-darwin/release/bundle/macos/Light MD.app/Contents/Info.plist"
           MARKETING_VERSION=$(node -p "require('./package.json').version")
+          if [[ ! "$BUILD_NUMBER" =~ ^[0-9]+([.][0-9]+){0,2}$ ]]; then
+            printf 'Invalid CFBundleVersion: %s\n' "$BUILD_NUMBER" >&2
+            exit 1
+          fi
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$PLIST"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$PLIST")" = "$BUILD_NUMBER"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PLIST")" = "$MARKETING_VERSION"
