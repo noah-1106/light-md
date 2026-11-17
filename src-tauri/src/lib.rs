@@ -264,6 +264,22 @@ where
     }
 }
 
+fn create_dir_bookmark(state: &AppState, dir: String) -> Result<(), String> {
+    if !Path::new(&dir).is_dir() {
+        return Err(format!("not a directory: {}", dir));
+    }
+    let canonical = std::fs::canonicalize(&dir)
+        .map_err(|e| format!("resolve directory failed: {}", e))?
+        .to_string_lossy()
+        .to_string();
+    let data = bookmark::create_bookmark(&dir)?;
+    let mut bookmarks = state.dir_bookmarks.lock().unwrap();
+    bookmarks.insert(dir, data.clone());
+    bookmarks.insert(canonical, data);
+    drop(bookmarks);
+    save_bookmarks(state, &store_from_state(state))
+}
+
 fn ensure_dir_bookmark(state: &AppState, path: &str) -> Result<(), String> {
     let dir = Path::new(path)
         .parent()
@@ -273,9 +289,7 @@ fn ensure_dir_bookmark(state: &AppState, path: &str) -> Result<(), String> {
     if state.dir_bookmarks.lock().unwrap().contains_key(&dir) {
         return Ok(());
     }
-    let data = bookmark::create_bookmark(&dir)?;
-    state.dir_bookmarks.lock().unwrap().insert(dir, data);
-    save_bookmarks(state, &store_from_state(state))
+    create_dir_bookmark(state, dir)
 }
 
 fn is_md_file(path: &Path) -> bool {
@@ -358,10 +372,43 @@ fn set_default_folder(path: String, state: State<AppState>) -> Result<(), String
 }
 
 #[tauri::command]
+fn register_directory(path: String, state: State<AppState>) -> Result<(), String> {
+    create_dir_bookmark(&state, path)
+}
+
+#[tauri::command]
+fn has_directory_access(path: &str, state: State<AppState>) -> bool {
+    with_path_access(&state, path, |p| {
+        std::fs::read_dir(p)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    })
+    .is_ok()
+}
+
+#[tauri::command]
 fn open_folder(path: &str, state: State<AppState>) -> Result<(), String> {
     with_path_access(&state, path, |p| {
-        tauri_plugin_opener::open_path(p, None::<&str>)
-            .map_err(|e| format!("open folder failed: {}", e))
+        #[cfg(target_os = "macos")]
+        {
+            use objc2_app_kit::NSWorkspace;
+            use objc2_foundation::{NSString, NSURL};
+
+            let path = NSString::from_str(p);
+            let url = NSURL::fileURLWithPath(&path);
+            let opened = NSWorkspace::sharedWorkspace().openURL(&url);
+            if opened {
+                Ok(())
+            } else {
+                Err(format!("Finder could not open folder: {}", p))
+            }
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            tauri_plugin_opener::open_path(p, None::<&str>)
+                .map_err(|e| format!("open folder failed: {}", e))
+        }
     })
 }
 
@@ -484,6 +531,8 @@ pub fn run() {
             get_suggested_default_folder,
             get_container_documents_folder,
             set_default_folder,
+            register_directory,
+            has_directory_access,
             open_folder,
             save_image,
             read_file_binary,
@@ -729,6 +778,46 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "local");
 
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn registers_the_exact_selected_directory_and_replaces_its_bookmark() {
+        let root = temp_path("directory-bookmark").with_extension("");
+        let selected = root.join("images with spaces");
+        std::fs::create_dir_all(&selected).unwrap();
+        let selected_str = selected.to_string_lossy().to_string();
+        let canonical_str = std::fs::canonicalize(&selected)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+
+        let state = AppState::default();
+        *state.bookmarks_path.lock().unwrap() = Some(root.join("bookmarks.json"));
+        state
+            .dir_bookmarks
+            .lock()
+            .unwrap()
+            .insert(selected_str.clone(), vec![0]);
+
+        create_dir_bookmark(&state, selected_str.clone()).unwrap();
+
+        assert!(state.dir_bookmarks.lock().unwrap().contains_key(&selected_str));
+        assert!(state.dir_bookmarks.lock().unwrap().contains_key(&canonical_str));
+        assert_ne!(
+            state.dir_bookmarks.lock().unwrap().get(&selected_str),
+            Some(&vec![0])
+        );
+        assert!(!state.dir_bookmarks.lock().unwrap().contains_key(
+            &root.to_string_lossy().to_string()
+        ));
+        let saved: BookmarksStore = serde_json::from_str(
+            &std::fs::read_to_string(root.join("bookmarks.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(saved.dir_bookmarks.contains_key(&selected_str));
+        assert!(saved.dir_bookmarks.contains_key(&canonical_str));
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

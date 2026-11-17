@@ -8,6 +8,11 @@ describe("local image path resolution", () => {
     expect(resolveImagePath("../图 片/(最终).png", "/docs/note.md", "")).toBe("/docs/../图 片/(最终).png");
   });
 
+  it("resolves outside-default-folder images beside their document", () => {
+    expect(resolveImagePath("external%20icon.png", "/tmp/external/note.md", "/container/LightMD"))
+      .toBe("/tmp/external/external icon.png");
+  });
+
   it("uses the default folder for untitled documents", () => {
     expect(resolveImagePath("images/a.png", null, "/default")).toBe("/default/images/a.png");
   });

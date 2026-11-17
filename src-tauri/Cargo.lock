@@ -1976,6 +1976,8 @@ dependencies = [
  "core-foundation",
  "core-foundation-sys",
  "dirs",
+ "objc2-app-kit",
+ "objc2-foundation",
  "percent-encoding",
  "serde",
  "serde_json",

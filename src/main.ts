@@ -63,6 +63,7 @@ interface Tab {
   pollInFlight: boolean;
   reloadInFlight: boolean;
   conflict: FileConflict | null;
+  imageAccessRequired: boolean;
 }
 
 // ─── State ───
@@ -95,6 +96,8 @@ const conflictBanner = document.getElementById("sync-conflict")!;
 const conflictMessage = document.getElementById("conflict-message")!;
 const conflictReloadButton = document.getElementById("conflict-reload") as HTMLButtonElement;
 const conflictOverwriteButton = document.getElementById("conflict-overwrite") as HTMLButtonElement;
+const imageAccessBanner = document.getElementById("image-access")!;
+const imageAccessGrantButton = document.getElementById("image-access-grant") as HTMLButtonElement;
 
 // ─── Helpers ───
 function genId() {
@@ -275,6 +278,7 @@ function showWelcome() {
   statusPathEl.textContent = "-";
   updateStatus(1, 1);
   updateConflictBanner();
+  updateImageAccessBanner();
 }
 
 // ─── Auto Save & External Changes ───
@@ -294,6 +298,10 @@ function updateConflictBanner() {
   conflictOverwriteButton.textContent = conflict.kind === "deleted"
     ? "从编辑器重新创建"
     : "用当前内容覆盖磁盘";
+}
+
+function updateImageAccessBanner() {
+  imageAccessBanner.hidden = !getActiveTab()?.imageAccessRequired;
 }
 
 function markConflict(tab: Tab, observedRevision: FileRevision | null) {
@@ -605,6 +613,9 @@ const previewRender = debounce(async (
   const html = await renderMarkdown(content);
   if (generation !== previewGeneration || activeTabId !== tabId) return;
   previewContent.innerHTML = html;
+  const tab = getTab(tabId);
+  if (tab) tab.imageAccessRequired = false;
+  updateImageAccessBanner();
 
   // Attach source line numbers to rendered blocks for scroll sync
   const blockLines = scanBlocks(content);
@@ -617,7 +628,7 @@ const previewRender = debounce(async (
     hljs.highlightElement(block as HTMLElement);
   });
 
-  fixImageSrcs(documentPath);
+  fixImageSrcs(tabId, documentPath);
   attachLinkHandlers();
   if (restorePreviewScroll !== undefined) {
     document.getElementById("preview-pane")!.scrollTop = restorePreviewScroll;
@@ -628,12 +639,20 @@ function getImageUrl(absPath: string): string {
   return convertFileSrc(absPath, "lightmd");
 }
 
-function fixImageSrcs(documentPath: string | null) {
+function fixImageSrcs(tabId: string, documentPath: string | null) {
   previewContent.querySelectorAll("img").forEach((img) => {
     const src = img.getAttribute("src");
     if (!src) return;
     const abs = resolveImagePath(src, documentPath, defaultFolder);
-    if (abs) img.src = getImageUrl(abs);
+    if (abs) {
+      img.addEventListener("error", () => {
+        const tab = getTab(tabId);
+        if (!tab || tab.path !== documentPath) return;
+        tab.imageAccessRequired = true;
+        updateImageAccessBanner();
+      }, { once: true });
+      img.src = getImageUrl(abs);
+    }
   });
 }
 
@@ -691,6 +710,7 @@ function newTab(
     pollInFlight: false,
     reloadInFlight: false,
     conflict: null,
+    imageAccessRequired: false,
   };
   tabs.push(tab);
   switchTab(tab.id);
@@ -707,6 +727,7 @@ function switchTab(id: string) {
   updateStatus(1, 1);
   renderTabs();
   updateConflictBanner();
+  updateImageAccessBanner();
   void checkExternalFile(id);
 }
 
@@ -766,15 +787,65 @@ async function loadFile(path: string) {
   }
 }
 
+async function chooseDirectory(defaultPath: string, title: string): Promise<string | null> {
+  const selected = await open({
+    directory: true,
+    multiple: false,
+    defaultPath: defaultPath || undefined,
+    title,
+  });
+  const path = Array.isArray(selected) ? selected[0] : selected;
+  return typeof path === "string" ? path : null;
+}
+
+async function authorizeImageDirectory() {
+  const tab = getActiveTab();
+  if (!tab) return;
+  const tabId = tab.id;
+  const defaultPath = tab.path ? directoryName(tab.path) : defaultFolder;
+
+  try {
+    const path = await chooseDirectory(
+      defaultPath,
+      "选择图片所在文件夹以授权 Light MD 显示本地图片",
+    );
+    if (!path) return;
+
+    await invoke("register_directory", { path });
+    const current = getTab(tabId);
+    if (!current) return;
+    current.imageAccessRequired = false;
+    updateImageAccessBanner();
+    if (activeTabId === tabId) schedulePreviewRender(current);
+  } catch (e) {
+    alert(`授权图片文件夹失败: ${e}`);
+  }
+}
+
 async function openActiveFolder() {
   const tab = getActiveTab();
   const documentFolder = tab?.path ? directoryName(tab.path) : "";
-  const folder = documentFolder || defaultFolder;
+  let folder = documentFolder || defaultFolder;
   if (!folder) return;
   try {
+    const accessible = await invoke<boolean>("has_directory_access", { path: folder });
+    if (!accessible) {
+      const selected = await chooseDirectory(
+        folder,
+        "选择当前文档所在文件夹以授权 Light MD 打开 Finder",
+      );
+      if (!selected) return;
+      await invoke("register_directory", { path: selected });
+      folder = selected;
+      if (tab && activeTabId === tab.id) {
+        tab.imageAccessRequired = false;
+        updateImageAccessBanner();
+        schedulePreviewRender(tab);
+      }
+    }
     await invoke("open_folder", { path: folder });
   } catch (e) {
-    console.error("open folder failed:", e);
+    alert(`打开文件夹失败: ${e}`);
   }
 }
 
@@ -1119,6 +1190,9 @@ async function init() {
   conflictOverwriteButton.addEventListener("click", () => {
     const tab = getActiveTab();
     if (tab?.conflict) void overwriteConflict(tab.id);
+  });
+  imageAccessGrantButton.addEventListener("click", () => {
+    void authorizeImageDirectory();
   });
 
   const checkActiveFile = () => {

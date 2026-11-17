@@ -218,7 +218,7 @@ body {
 
 .sync-conflict[hidden] { display: none; }
 
-#conflict-message { flex: 1; min-width: 200px; }
+#conflict-message, #image-access-message { flex: 1; min-width: 200px; }
 
 .conflict-actions {
   display: flex;

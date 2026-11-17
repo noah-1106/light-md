@@ -16,6 +16,11 @@ on:
         required: false
         default: v1.0.6
         type: string
+      build_number:
+        description: MAS CFBundleVersion (must be unique per upload)
+        required: true
+        default: 1.0.6.1
+        type: string
 
 jobs:
   publish-mas:
@@ -74,6 +79,17 @@ jobs:
           APPLE_TEAM_ID: "UWJL48X4C8"
         with:
           args: '--target universal-apple-darwin --bundles app'
+
+      - name: Set MAS build number
+        env:
+          BUILD_NUMBER: ${{ inputs.build_number }}
+        run: |
+          set -euo pipefail
+          PLIST="src-tauri/target/universal-apple-darwin/release/bundle/macos/Light MD.app/Contents/Info.plist"
+          MARKETING_VERSION=$(node -p "require('./package.json').version")
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$PLIST"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$PLIST")" = "$BUILD_NUMBER"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PLIST")" = "$MARKETING_VERSION"
 
       - name: Embed Mac App Store provisioning profile
         env:
